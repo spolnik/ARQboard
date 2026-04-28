@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/spolnik/arqboard/internal/db"
 )
 
 type Readiness interface {
@@ -21,9 +23,16 @@ type Readiness interface {
 }
 
 type Options struct {
-	Readiness Readiness
-	StaticFS  fs.FS
-	Logger    *slog.Logger
+	Readiness  Readiness
+	BoardStore BoardStore
+	StaticFS   fs.FS
+	Logger     *slog.Logger
+}
+
+type BoardStore interface {
+	GetDefaultBoard(context.Context) (db.Board, error)
+	CreateCard(context.Context, db.CreateCardParams) (db.BoardCard, error)
+	MoveCard(context.Context, db.MoveCardParams) (db.Board, error)
 }
 
 type errorBody struct {
@@ -53,6 +62,10 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
 		})
+		r.Get("/boards/default", defaultBoard(opts.BoardStore))
+		r.Post("/cards", createCard(opts.BoardStore))
+		r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
+		r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
 	})
 
 	if opts.StaticFS != nil {
@@ -64,6 +77,96 @@ func NewRouter(opts Options) http.Handler {
 	}
 
 	return r
+}
+
+type createCardRequest struct {
+	ColumnID      string `json:"columnId"`
+	Title         string `json:"title"`
+	OwnerInitials string `json:"ownerInitials"`
+}
+
+type moveCardRequest struct {
+	ColumnID string `json:"columnId"`
+	Position int    `json:"position"`
+}
+
+func defaultBoard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		board, err := store.GetDefaultBoard(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, board)
+	}
+}
+
+func createCard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload createCardRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.ColumnID) == "" || strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_card", "columnId and title are required")
+			return
+		}
+
+		card, err := store.CreateCard(r.Context(), db.CreateCardParams{
+			ColumnID:      payload.ColumnID,
+			Title:         payload.Title,
+			OwnerInitials: payload.OwnerInitials,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, card)
+	}
+}
+
+func moveCard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload moveCardRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.ColumnID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_move", "columnId is required")
+			return
+		}
+
+		board, err := store.MoveCard(r.Context(), db.MoveCardParams{
+			CardID:   chi.URLParam(r, "cardID"),
+			ColumnID: payload.ColumnID,
+			Position: payload.Position,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, board)
+	}
 }
 
 func readyz(readiness Readiness) http.HandlerFunc {
@@ -158,6 +261,26 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 			Message: message,
 		},
 	})
+}
+
+func writeStoreError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, db.ErrValidation):
+		writeError(w, http.StatusBadRequest, "invalid_request", "request validation failed")
+	case errors.Is(err, db.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "resource not found")
+	case errors.Is(err, db.ErrDatabaseUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error", "request failed")
+	}
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

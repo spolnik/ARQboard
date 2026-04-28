@@ -135,6 +135,7 @@ CREATE TABLE wiki_pages (
 CREATE INDEX wiki_pages_workspace_id_idx ON wiki_pages(workspace_id);
 CREATE INDEX wiki_pages_board_id_idx ON wiki_pages(board_id);
 
+-- +goose StatementBegin
 CREATE FUNCTION set_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -144,6 +145,7 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+-- +goose StatementEnd
 
 CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER workspaces_set_updated_at BEFORE UPDATE ON workspaces FOR EACH ROW EXECUTE FUNCTION set_updated_at();

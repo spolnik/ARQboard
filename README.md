@@ -4,14 +4,17 @@ ARQboard is a simple, self-hostable kanban board with onboard wiki pages and an 
 
 The current implementation plan is documented in [docs/INITIAL_SPEC.md](docs/INITIAL_SPEC.md).
 
-## Current Skeleton
+## Current App
 
-This repo now contains the Phase 0 service and web skeleton:
+This repo now contains the Go service, database-backed board API, and React web app:
 
 - Go CLI entrypoint: `arqboard serve`, `arqboard migrate`, and `arqboard admin create-user`.
 - HTTP health checks: `/healthz` does not touch the database, `/readyz` checks PostgreSQL.
-- PostgreSQL migrations through Goose-compatible SQL files.
+- PostgreSQL and SQLite migrations through Goose-compatible SQL files.
+- A seeded default workspace board with persisted columns, cards, card creation, and card movement.
+- JSON API endpoints for the default board, card creation, and card moves.
 - React + Vite + TypeScript + Tailwind frontend under `web/`.
+- Drag-and-drop card movement through `dnd-kit`, with accessible button controls for keyboard-friendly moves.
 - Dockerfile, Docker Compose Postgres service, Makefile, and CI workflow.
 
 ## Local Setup

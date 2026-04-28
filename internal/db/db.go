@@ -63,7 +63,17 @@ func Open(ctx context.Context, databaseURL string) (*Connection, error) {
 			pool.Close()
 			return nil, err
 		}
-		return &Connection{Driver: driver, Pool: pool}, nil
+		sqlDB, err := sql.Open(sqlDriverName(driver), databaseURL)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		if err := sqlDB.PingContext(openCtx); err != nil {
+			pool.Close()
+			sqlDB.Close()
+			return nil, err
+		}
+		return &Connection{Driver: driver, Pool: pool, SQL: sqlDB}, nil
 	case DriverSQLite:
 		if err := ensureSQLiteDir(databaseURL); err != nil {
 			return nil, err
