@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build",
     "lint": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest --run",
+    "test:coverage": "vitest --run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^5.2.0",
+    "@vitest/coverage-v8": "^4.1.5",
     "autoprefixer": "^10.4.20",
     "jsdom": "^29.1.0",
     "postcss": "^8.4.49",
