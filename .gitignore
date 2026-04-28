@@ -2,18 +2,21 @@
 
 # dependencies
 /node_modules
-/.pnp
-.pnp.js
+/web/node_modules
 
 # testing
 /coverage
+/web/coverage
 
-# next.js
-/.next/
-/out/
-
-# production
+# frontend builds
+/web/dist/
 /build
+/dist
+
+# go
+/bin/
+*.test
+*.out
 
 # misc
 .DS_Store
@@ -28,9 +31,12 @@ yarn-error.log*
 .env*.local
 .env
 
-# vercel
-.vercel
-
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+
+# generated
+/internal/db/generated/
+
+# local data
+/tmp/
+/data/

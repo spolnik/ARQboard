@@ -1,0 +1,16 @@
+.git
+.github
+data
+tmp
+
+web/node_modules
+web/dist
+web/*.tsbuildinfo
+
+node_modules
+coverage
+dist
+build
+
+.env
+.env*.local
