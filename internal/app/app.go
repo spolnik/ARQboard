@@ -80,9 +80,10 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 
 	logger := slog.New(slog.NewJSONHandler(stderr, nil))
 	router := httpapi.NewRouter(httpapi.Options{
-		Readiness: db.ReadinessChecker{Conn: pool},
-		StaticFS:  os.DirFS(cfg.WebDistDir),
-		Logger:    logger,
+		Readiness:  db.ReadinessChecker{Conn: pool},
+		BoardStore: db.BoardStore{Conn: pool},
+		StaticFS:   os.DirFS(cfg.WebDistDir),
+		Logger:     logger,
 	})
 
 	server := &http.Server{
