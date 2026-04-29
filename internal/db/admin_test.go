@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spolnik/arqboard/migrations"
 )
@@ -79,19 +80,7 @@ func TestExplicitUnsupportedDatabaseURLIsRejected(t *testing.T) {
 
 func TestSQLiteMigrationAndAdminUser(t *testing.T) {
 	ctx := context.Background()
-	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
-	migrationFS, err := migrations.ForDriver(string(DriverSQLite))
-	if err != nil {
-		t.Fatalf("ForDriver returned error: %v", err)
-	}
-	if err := MigrateUp(ctx, databaseURL, migrationFS); err != nil {
-		t.Fatalf("MigrateUp returned error: %v", err)
-	}
-
-	conn, err := Open(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("Open returned error: %v", err)
-	}
+	conn := openMigratedSQLite(t)
 	defer conn.Close()
 
 	userID, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
@@ -123,6 +112,161 @@ func TestSQLiteMigrationAndAdminUser(t *testing.T) {
 	})
 	if !errors.Is(err, ErrUserExists) {
 		t.Fatalf("duplicate CreateAdminUser error = %v, want ErrUserExists", err)
+	}
+}
+
+func TestAuthStoreLoginCurrentUserAndLogout(t *testing.T) {
+	ctx := context.Background()
+	conn := openMigratedSQLite(t)
+	defer conn.Close()
+
+	userID, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
+		Email:       "Admin@Example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin User",
+	})
+	if err != nil {
+		t.Fatalf("CreateAdminUser returned error: %v", err)
+	}
+
+	store := AuthStore{Conn: conn}
+	session, err := store.Login(ctx, LoginParams{
+		Email:    " admin@example.com ",
+		Password: "correct horse battery staple",
+	})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("Login returned empty token")
+	}
+	if !session.ExpiresAt.After(time.Now()) {
+		t.Fatalf("ExpiresAt = %v, want future time", session.ExpiresAt)
+	}
+	if session.User.ID != userID {
+		t.Fatalf("session.User.ID = %q, want %q", session.User.ID, userID)
+	}
+	if session.User.Email != "admin@example.com" {
+		t.Fatalf("session.User.Email = %q, want normalized admin@example.com", session.User.Email)
+	}
+	if session.User.DisplayName != "Admin User" {
+		t.Fatalf("session.User.DisplayName = %q, want Admin User", session.User.DisplayName)
+	}
+	if !session.User.IsAdmin {
+		t.Fatal("session.User.IsAdmin = false, want true")
+	}
+
+	user, err := store.CurrentUser(ctx, session.Token)
+	if err != nil {
+		t.Fatalf("CurrentUser returned error: %v", err)
+	}
+	if user.ID != userID {
+		t.Fatalf("CurrentUser ID = %q, want %q", user.ID, userID)
+	}
+
+	if err := store.Logout(ctx, session.Token); err != nil {
+		t.Fatalf("Logout returned error: %v", err)
+	}
+	_, err = store.CurrentUser(ctx, session.Token)
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("CurrentUser after logout error = %v, want ErrUnauthenticated", err)
+	}
+}
+
+func TestAuthStoreRejectsInvalidCredentials(t *testing.T) {
+	ctx := context.Background()
+	conn := openMigratedSQLite(t)
+	defer conn.Close()
+
+	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
+		Email:    "admin@example.com",
+		Password: "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("CreateAdminUser returned error: %v", err)
+	}
+
+	store := AuthStore{Conn: conn}
+	tests := []LoginParams{
+		{Email: "admin@example.com", Password: "wrong password"},
+		{Email: "missing@example.com", Password: "correct horse battery staple"},
+		{Email: "", Password: "correct horse battery staple"},
+		{Email: "admin@example.com", Password: ""},
+	}
+
+	for _, params := range tests {
+		_, err := store.Login(ctx, params)
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login(%#v) error = %v, want ErrInvalidCredentials", params, err)
+		}
+	}
+}
+
+func TestAuthStorePreservesPasswordWhitespace(t *testing.T) {
+	ctx := context.Background()
+	conn := openMigratedSQLite(t)
+	defer conn.Close()
+
+	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
+		Email:    "admin@example.com",
+		Password: "  correct horse battery staple  ",
+	}); err != nil {
+		t.Fatalf("CreateAdminUser returned error: %v", err)
+	}
+
+	store := AuthStore{Conn: conn}
+	if _, err := store.Login(ctx, LoginParams{
+		Email:    "admin@example.com",
+		Password: "  correct horse battery staple  ",
+	}); err != nil {
+		t.Fatalf("Login with exact password returned error: %v", err)
+	}
+	if _, err := store.Login(ctx, LoginParams{
+		Email:    "admin@example.com",
+		Password: "correct horse battery staple",
+	}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login with trimmed password error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestAuthStoreExpiresSessions(t *testing.T) {
+	ctx := context.Background()
+	conn := openMigratedSQLite(t)
+	defer conn.Close()
+
+	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
+		Email:    "admin@example.com",
+		Password: "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("CreateAdminUser returned error: %v", err)
+	}
+
+	store := AuthStore{Conn: conn, SessionTTL: -time.Hour}
+	session, err := store.Login(ctx, LoginParams{
+		Email:    "admin@example.com",
+		Password: "correct horse battery staple",
+	})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+
+	_, err = store.CurrentUser(ctx, session.Token)
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("CurrentUser for expired session error = %v, want ErrUnauthenticated", err)
+	}
+}
+
+func TestAuthStoreRequiresDatabase(t *testing.T) {
+	ctx := context.Background()
+	store := AuthStore{}
+
+	if _, err := store.Login(ctx, LoginParams{Email: "admin@example.com", Password: "correct horse battery staple"}); !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("Login error = %v, want ErrDatabaseUnavailable", err)
+	}
+	if _, err := store.CurrentUser(ctx, "token"); !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("CurrentUser error = %v, want ErrDatabaseUnavailable", err)
+	}
+	if err := store.Logout(ctx, "token"); !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("Logout error = %v, want ErrDatabaseUnavailable", err)
 	}
 }
 
@@ -200,4 +344,24 @@ func TestDriverAndSQLiteHelpers(t *testing.T) {
 	if isUniqueViolation(errors.New("ordinary failure")) {
 		t.Fatal("ordinary error was treated as unique violation")
 	}
+}
+
+func openMigratedSQLite(t *testing.T) *Connection {
+	t.Helper()
+
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	migrationFS, err := migrations.ForDriver(string(DriverSQLite))
+	if err != nil {
+		t.Fatalf("ForDriver returned error: %v", err)
+	}
+	if err := MigrateUp(ctx, databaseURL, migrationFS); err != nil {
+		t.Fatalf("MigrateUp returned error: %v", err)
+	}
+
+	conn, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	return conn
 }

@@ -82,6 +82,7 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 	router := httpapi.NewRouter(httpapi.Options{
 		Readiness:  db.ReadinessChecker{Conn: pool},
 		BoardStore: db.BoardStore{Conn: pool},
+		AuthStore:  db.AuthStore{Conn: pool},
 		StaticFS:   os.DirFS(cfg.WebDistDir),
 		Logger:     logger,
 	})

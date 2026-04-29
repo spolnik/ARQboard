@@ -11,8 +11,9 @@ This repo now contains the Go service, database-backed board API, and React web 
 - Go CLI entrypoint: `arqboard serve`, `arqboard migrate`, and `arqboard admin create-user`.
 - HTTP health checks: `/healthz` does not touch the database, `/readyz` checks PostgreSQL.
 - PostgreSQL and SQLite migrations through Goose-compatible SQL files.
+- CLI-created admin users can sign in through DB-backed HTTP-only sessions.
 - A seeded default workspace board with persisted columns, cards, card creation, and card movement.
-- JSON API endpoints for the default board, card creation, and card moves.
+- Authenticated JSON API endpoints for the default board, card creation, card moves, card detail, comments, and wiki pages.
 - React + Vite + TypeScript + Tailwind frontend under `web/`.
 - Drag-and-drop card movement through `dnd-kit`, with accessible button controls for keyboard-friendly moves.
 - Dockerfile, Docker Compose Postgres service, Makefile, and CI workflow.
@@ -23,6 +24,7 @@ For local development, ARQboard defaults to a file-backed SQLite database at `da
 
 ```bash
 make migrate-up
+go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple"
 cd web && npm install && npm test && npm run build
 make dev
 ```

@@ -243,7 +243,7 @@ Possible later features:
 
 Use JSON over HTTP under `/api`.
 
-Current local baseline implements the default-board slice with persisted cards, movement, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
+Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, movement, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
 
 Suggested endpoints:
 
@@ -387,5 +387,5 @@ The first skeleton is complete when:
 - Frontend assets: copy the Vite build into the Docker image and serve it from `WEB_DIST_DIR`.
 - Use generated `sqlc` code for application query paths, while allowing small handwritten bootstrap queries for CLI setup commands.
 - Local development can use SQLite as a zero-configuration file-backed database; PostgreSQL remains the production database and generated-query target.
-- Choose session storage details and CSRF strategy.
+- Session storage uses database-backed hashed opaque tokens; choose CSRF strategy.
 - Decide whether V1 supports multiple workspaces in UI or only in schema.
