@@ -243,6 +243,8 @@ Possible later features:
 
 Use JSON over HTTP under `/api`.
 
+Current local baseline implements the default-board slice with persisted cards, movement, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
+
 Suggested endpoints:
 
 ```txt

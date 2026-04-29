@@ -58,10 +58,16 @@ const boardFixture = {
         },
       ],
     },
+    {
+      id: 'column-done',
+      title: 'Done',
+      position: 3,
+      cards: [],
+    },
   ],
   wikiPages: [
-    { id: 'wiki-1', title: 'Deployment checklist', slug: 'deployment-checklist' },
-    { id: 'wiki-2', title: 'Onboarding notes', slug: 'onboarding-notes' },
+    { id: 'wiki-1', title: 'Deployment checklist', slug: 'deployment-checklist', bodyMarkdown: '# Deploy\n\n- Build image' },
+    { id: 'wiki-2', title: 'Onboarding notes', slug: 'onboarding-notes', bodyMarkdown: 'Welcome aboard.' },
   ],
 };
 
@@ -88,7 +94,46 @@ const movedBoardFixture = {
       ],
     },
     boardFixture.columns[2],
+    boardFixture.columns[3],
   ],
+};
+
+const updatedCard = {
+  ...boardFixture.columns[0].cards[0],
+  title: 'Wire production auth flow',
+  description: 'Document cookie boundaries and refresh behavior.',
+  owner: 'QA',
+  priority: 'Urgent',
+  due: 'May 9',
+};
+
+const cardDetail = {
+  card: boardFixture.columns[0].cards[0],
+  comments: [],
+  activity: [{ id: 'event-1', cardId: 'card-1', eventType: 'card.moved', summary: 'Card moved', createdAt: '2026-04-29T10:00:00Z' }],
+};
+
+const commentedDetail = {
+  card: updatedCard,
+  comments: [{ id: 'comment-1', cardId: 'card-1', body: 'Add rollback note before release.', createdAt: '2026-04-29T10:05:00Z' }],
+  activity: [
+    { id: 'event-2', cardId: 'card-1', eventType: 'card.commented', summary: 'Comment added', createdAt: '2026-04-29T10:05:00Z' },
+    { id: 'event-1', cardId: 'card-1', eventType: 'card.updated', summary: 'Card updated', createdAt: '2026-04-29T10:00:00Z' },
+  ],
+};
+
+const updatedWikiPage = {
+  id: 'wiki-1',
+  title: 'Deployment checklist',
+  slug: 'deployment-checklist',
+  bodyMarkdown: '# Deploy safely\n\n- Run migrations',
+};
+
+const createdWikiPage = {
+  id: 'wiki-new',
+  title: 'Release runbook',
+  slug: 'release-runbook',
+  bodyMarkdown: '# Release runbook\n\nShip carefully.',
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -113,6 +158,33 @@ describe('App', () => {
         if (url === '/api/cards/card-1/move' && init?.method === 'PATCH') {
           return jsonResponse(movedBoardFixture);
         }
+        if (url === '/api/cards/card-1' && !init?.method) {
+          return jsonResponse(cardDetail);
+        }
+        if (url === '/api/cards/card-2' && !init?.method) {
+          return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+        }
+        if (url === '/api/cards/card-3' && !init?.method) {
+          return jsonResponse({ card: boardFixture.columns[2].cards[0], comments: [], activity: [] });
+        }
+        if (url === '/api/cards/card-1' && init?.method === 'PATCH') {
+          return jsonResponse(updatedCard);
+        }
+        if (url === '/api/cards/card-1/comments' && init?.method === 'POST') {
+          return jsonResponse(commentedDetail, 201);
+        }
+        if (url === '/api/wiki') {
+          if (init?.method === 'POST') {
+            return jsonResponse(createdWikiPage, 201);
+          }
+          return jsonResponse(boardFixture.wikiPages);
+        }
+        if (url === '/api/wiki/wiki-1' && !init?.method) {
+          return jsonResponse(boardFixture.wikiPages[0]);
+        }
+        if (url === '/api/wiki/wiki-1' && init?.method === 'PATCH') {
+          return jsonResponse(updatedWikiPage);
+        }
 
         throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
       }),
@@ -129,8 +201,48 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /drag wire auth session cookie flow/i })).toBeInTheDocument();
     expect(screen.getByText('Ready for review')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: /done column/i })).toBeInTheDocument();
     expect(screen.getAllByText('Deployment checklist').length).toBeGreaterThan(0);
     expect(fetch).toHaveBeenCalledWith('/api/boards/default');
+  });
+
+  it('shows a helpful error when the board cannot load', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: { code: 'not_ready' } }, 500)),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/could not load the board/i)).toBeInTheDocument();
+  });
+
+  it('renders low-priority cards distinctly', async () => {
+    const lowPriorityBoard = {
+      ...boardFixture,
+      columns: boardFixture.columns.map((column) => ({
+        ...column,
+        cards: column.cards.map((card) => (card.id === 'card-1' ? { ...card, priority: 'Low' } : card)),
+      })),
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/boards/default') {
+          return jsonResponse(lowPriorityBoard);
+        }
+        if (url === '/api/cards/card-1') {
+          return jsonResponse({ card: lowPriorityBoard.columns[0].cards[0], comments: [], activity: [] });
+        }
+        return jsonResponse({ card: lowPriorityBoard.columns[1].cards[0], comments: [], activity: [] });
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText('Low')).toBeInTheDocument();
   });
 
   it('updates the card detail panel when a card is selected', async () => {
@@ -142,6 +254,69 @@ describe('App', () => {
     expect(within(detail).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
     expect(within(detail).getByText(/Owner MS/)).toBeInTheDocument();
     expect(within(detail).getByText(/Priority High/)).toBeInTheDocument();
+  });
+
+  it('edits selected card details through the API', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /view card wire auth session cookie flow/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /edit card/i }));
+    fireEvent.change(screen.getByLabelText(/card title/i), {
+      target: { value: 'Wire production auth flow' },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: 'Document cookie boundaries and refresh behavior.' },
+    });
+    fireEvent.change(screen.getByLabelText(/priority/i), {
+      target: { value: 'urgent' },
+    });
+    fireEvent.change(screen.getByLabelText(/owner initials/i), {
+      target: { value: 'QA' },
+    });
+    fireEvent.change(screen.getByLabelText(/due label/i), {
+      target: { value: 'May 9' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save card/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: 'Wire production auth flow',
+            description: 'Document cookie boundaries and refresh behavior.',
+            priority: 'urgent',
+            ownerInitials: 'QA',
+            due: 'May 9',
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('heading', { name: /wire production auth flow/i })).toBeInTheDocument();
+    expect(screen.getByText(/Priority Urgent/)).toBeInTheDocument();
+  });
+
+  it('adds comments and shows card activity', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /view card wire auth session cookie flow/i }));
+    fireEvent.change(await screen.findByLabelText(/new comment/i), {
+      target: { value: 'Add rollback note before release.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /add comment/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1/comments',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ body: 'Add rollback note before release.' }),
+        }),
+      ),
+    );
+    expect(screen.getByText('Add rollback note before release.')).toBeInTheDocument();
+    expect(screen.getByText(/card.commented/i)).toBeInTheDocument();
   });
 
   it('creates a new planned card through the API', async () => {
@@ -226,5 +401,80 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /boards/i }));
     expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('edits markdown wiki pages with preview', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /deployment checklist/i }));
+    expect(await screen.findByRole('heading', { name: /deploy/i })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/markdown body/i), {
+      target: { value: '# Deploy safely\n\n- Run migrations' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save page/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/wiki/wiki-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: 'Deployment checklist',
+            bodyMarkdown: '# Deploy safely\n\n- Run migrations',
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('heading', { name: /deploy safely/i })).toBeInTheDocument();
+  });
+
+  it('creates markdown wiki pages', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
+    fireEvent.change(screen.getByLabelText(/wiki title/i), {
+      target: { value: 'Release runbook' },
+    });
+    fireEvent.change(screen.getByLabelText(/markdown body/i), {
+      target: { value: '# Release runbook\n\nShip carefully.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create page/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/wiki',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            title: 'Release runbook',
+            bodyMarkdown: '# Release runbook\n\nShip carefully.',
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('button', { name: /release runbook/i })).toBeInTheDocument();
+  });
+
+  it('previews markdown paragraphs, nested headings, lists, and empty pages', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
+
+    expect(screen.getByText(/no content yet/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/markdown body/i), {
+      target: {
+        value: '## Rollout notes\n\nShip in small batches\nwith checks.\n\n- Run migrations\n- Verify health',
+      },
+    });
+
+    expect(screen.getByRole('heading', { name: /rollout notes/i })).toBeInTheDocument();
+    expect(screen.getByText('Ship in small batches with checks.')).toBeInTheDocument();
+    expect(screen.getByText('Run migrations')).toBeInTheDocument();
+    expect(screen.getByText('Verify health')).toBeInTheDocument();
   });
 });

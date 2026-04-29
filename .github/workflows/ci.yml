@@ -33,6 +33,7 @@ jobs:
       - run: npm run build
         working-directory: web
       - run: node .github/scripts/coverage-summary.mjs
+      - run: node .github/scripts/check-coverage.mjs
       - run: docker build -t arqboard:ci .
       - uses: actions/upload-artifact@v4
         with:

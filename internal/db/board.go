@@ -38,9 +38,31 @@ type BoardCard struct {
 }
 
 type WikiPage struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Slug  string `json:"slug"`
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Slug         string `json:"slug"`
+	BodyMarkdown string `json:"bodyMarkdown"`
+}
+
+type CardDetail struct {
+	Card     BoardCard       `json:"card"`
+	Comments []CardComment   `json:"comments"`
+	Activity []ActivityEvent `json:"activity"`
+}
+
+type CardComment struct {
+	ID        string `json:"id"`
+	CardID    string `json:"cardId"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type ActivityEvent struct {
+	ID        string `json:"id"`
+	CardID    string `json:"cardId"`
+	EventType string `json:"eventType"`
+	Summary   string `json:"summary"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type CreateCardParams struct {
@@ -49,10 +71,35 @@ type CreateCardParams struct {
 	OwnerInitials string
 }
 
+type UpdateCardParams struct {
+	CardID        string
+	Title         string
+	Description   string
+	Priority      string
+	OwnerInitials string
+	Due           string
+}
+
 type MoveCardParams struct {
 	CardID   string
 	ColumnID string
 	Position int
+}
+
+type CreateCardCommentParams struct {
+	CardID string
+	Body   string
+}
+
+type CreateWikiPageParams struct {
+	Title        string
+	BodyMarkdown string
+}
+
+type UpdateWikiPageParams struct {
+	PageID       string
+	Title        string
+	BodyMarkdown string
 }
 
 type BoardStore struct {
@@ -90,6 +137,7 @@ var defaultColumns = []seedColumn{
 	{title: "Planned", position: 0},
 	{title: "In progress", position: 1},
 	{title: "Ready for review", position: 2},
+	{title: "Done", position: 3},
 }
 
 var defaultCards = []seedCard{
@@ -187,7 +235,13 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 	defer tx.Rollback()
 
 	var boardID string
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT board_id FROM columns WHERE id = %s", placeholder(driver, 1)), columnID).Scan(&boardID); err != nil {
+	var workspaceID string
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT columns.board_id, boards.workspace_id
+		FROM columns
+		JOIN boards ON boards.id = columns.board_id
+		WHERE columns.id = %s
+	`, placeholder(driver, 1)), columnID).Scan(&boardID, &workspaceID); err != nil {
 		return BoardCard{}, notFoundOrErr(err)
 	}
 
@@ -216,6 +270,106 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 		placeholder(driver, 9),
 	), cardID, boardID, columnID, title, "New card created locally and persisted in the board database.", "normal", position, ownerInitials(params.OwnerInitials), "Later")
 	if err != nil {
+		return BoardCard{}, err
+	}
+	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, cardID, "card.created"); err != nil {
+		return BoardCard{}, err
+	}
+
+	card, err := loadCard(ctx, tx, driver, cardID)
+	if err != nil {
+		return BoardCard{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BoardCard{}, err
+	}
+
+	return card, nil
+}
+
+func (store BoardStore) GetCardDetail(ctx context.Context, cardID string) (CardDetail, error) {
+	if strings.TrimSpace(cardID) == "" {
+		return CardDetail{}, fmt.Errorf("%w: cardId is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return CardDetail{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	defer tx.Rollback()
+
+	detail, err := loadCardDetail(ctx, tx, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CardDetail{}, err
+	}
+
+	return detail, nil
+}
+
+func (store BoardStore) UpdateCard(ctx context.Context, params UpdateCardParams) (BoardCard, error) {
+	cardID := strings.TrimSpace(params.CardID)
+	if cardID == "" {
+		return BoardCard{}, fmt.Errorf("%w: cardId is required", ErrValidation)
+	}
+	title := strings.TrimSpace(params.Title)
+	if title == "" {
+		return BoardCard{}, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+	priority, err := normalizePriority(params.Priority)
+	if err != nil {
+		return BoardCard{}, err
+	}
+	due := strings.TrimSpace(params.Due)
+	if due == "" {
+		due = "Later"
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return BoardCard{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return BoardCard{}, err
+	}
+	defer tx.Rollback()
+
+	workspaceID, boardID, err := loadCardScope(ctx, tx, driver, cardID)
+	if err != nil {
+		return BoardCard{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE cards
+		SET title = %s,
+			description = %s,
+			priority = %s,
+			owner_initials = %s,
+			due_label = %s,
+			updated_at = %s
+		WHERE id = %s
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+		placeholder(driver, 5),
+		currentTimestamp(driver),
+		placeholder(driver, 6),
+	), title, strings.TrimSpace(params.Description), priority, ownerInitials(params.OwnerInitials), due, cardID)
+	if err != nil {
+		return BoardCard{}, err
+	}
+	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, cardID, "card.updated"); err != nil {
 		return BoardCard{}, err
 	}
 
@@ -253,8 +407,14 @@ func (store BoardStore) MoveCard(ctx context.Context, params MoveCardParams) (Bo
 	defer tx.Rollback()
 
 	var boardID string
+	var workspaceID string
 	var currentColumnID string
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT board_id, column_id FROM cards WHERE id = %s", placeholder(driver, 1)), params.CardID).Scan(&boardID, &currentColumnID); err != nil {
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT cards.board_id, boards.workspace_id, cards.column_id
+		FROM cards
+		JOIN boards ON boards.id = cards.board_id
+		WHERE cards.id = %s
+	`, placeholder(driver, 1)), params.CardID).Scan(&boardID, &workspaceID, &currentColumnID); err != nil {
 		return Board{}, notFoundOrErr(err)
 	}
 
@@ -295,6 +455,9 @@ func (store BoardStore) MoveCard(ctx context.Context, params MoveCardParams) (Bo
 			}
 		}
 	}
+	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, params.CardID, "card.moved"); err != nil {
+		return Board{}, err
+	}
 
 	board, err := loadBoard(ctx, tx, driver, boardID)
 	if err != nil {
@@ -305,6 +468,223 @@ func (store BoardStore) MoveCard(ctx context.Context, params MoveCardParams) (Bo
 	}
 
 	return board, nil
+}
+
+func (store BoardStore) CreateCardComment(ctx context.Context, params CreateCardCommentParams) (CardDetail, error) {
+	cardID := strings.TrimSpace(params.CardID)
+	if cardID == "" {
+		return CardDetail{}, fmt.Errorf("%w: cardId is required", ErrValidation)
+	}
+	body := strings.TrimSpace(params.Body)
+	if body == "" {
+		return CardDetail{}, fmt.Errorf("%w: body is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return CardDetail{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	defer tx.Rollback()
+
+	workspaceID, boardID, err := loadCardScope(ctx, tx, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+
+	commentID, err := newID()
+	if err != nil {
+		return CardDetail{}, err
+	}
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO card_comments (id, card_id, body)
+		VALUES (%s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+	), commentID, cardID, body)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, cardID, "card.commented"); err != nil {
+		return CardDetail{}, err
+	}
+
+	detail, err := loadCardDetail(ctx, tx, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CardDetail{}, err
+	}
+
+	return detail, nil
+}
+
+func (store BoardStore) ListWikiPages(ctx context.Context) ([]WikiPage, error) {
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	boardID, err := ensureDefaultBoard(ctx, tx, driver)
+	if err != nil {
+		return nil, err
+	}
+	pages, err := loadWikiPages(ctx, tx, driver, boardID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return pages, nil
+}
+
+func (store BoardStore) GetWikiPage(ctx context.Context, pageID string) (WikiPage, error) {
+	pageID = strings.TrimSpace(pageID)
+	if pageID == "" {
+		return WikiPage{}, fmt.Errorf("%w: pageId is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	return loadWikiPage(ctx, sqlDB, driver, pageID)
+}
+
+func (store BoardStore) CreateWikiPage(ctx context.Context, params CreateWikiPageParams) (WikiPage, error) {
+	title := strings.TrimSpace(params.Title)
+	if title == "" {
+		return WikiPage{}, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	defer tx.Rollback()
+
+	boardID, err := ensureDefaultBoard(ctx, tx, driver)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	var workspaceID string
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT workspace_id FROM boards WHERE id = %s", placeholder(driver, 1)), boardID).Scan(&workspaceID); err != nil {
+		return WikiPage{}, err
+	}
+
+	pageID, err := newID()
+	if err != nil {
+		return WikiPage{}, err
+	}
+	slug, err := uniqueWikiSlug(ctx, tx, driver, workspaceID, "", slugify(title))
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO wiki_pages (id, workspace_id, board_id, title, slug, body_markdown)
+		VALUES (%s, %s, %s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+		placeholder(driver, 5),
+		placeholder(driver, 6),
+	), pageID, workspaceID, boardID, title, slug, strings.TrimSpace(params.BodyMarkdown))
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	page, err := loadWikiPage(ctx, tx, driver, pageID)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WikiPage{}, err
+	}
+
+	return page, nil
+}
+
+func (store BoardStore) UpdateWikiPage(ctx context.Context, params UpdateWikiPageParams) (WikiPage, error) {
+	pageID := strings.TrimSpace(params.PageID)
+	if pageID == "" {
+		return WikiPage{}, fmt.Errorf("%w: pageId is required", ErrValidation)
+	}
+	title := strings.TrimSpace(params.Title)
+	if title == "" {
+		return WikiPage{}, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	defer tx.Rollback()
+
+	var workspaceID string
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT workspace_id FROM wiki_pages WHERE id = %s", placeholder(driver, 1)), pageID).Scan(&workspaceID); err != nil {
+		return WikiPage{}, notFoundOrErr(err)
+	}
+	slug, err := uniqueWikiSlug(ctx, tx, driver, workspaceID, pageID, slugify(title))
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE wiki_pages
+		SET title = %s,
+			slug = %s,
+			body_markdown = %s,
+			updated_at = %s
+		WHERE id = %s
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		currentTimestamp(driver),
+		placeholder(driver, 4),
+	), title, slug, strings.TrimSpace(params.BodyMarkdown), pageID)
+	if err != nil {
+		return WikiPage{}, err
+	}
+
+	page, err := loadWikiPage(ctx, tx, driver, pageID)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WikiPage{}, err
+	}
+
+	return page, nil
 }
 
 func (store BoardStore) database() (*sql.DB, Driver, error) {
@@ -584,7 +964,7 @@ func loadCardsByColumn(ctx context.Context, q sqlQueryer, driver Driver, boardID
 
 func loadWikiPages(ctx context.Context, q sqlQueryer, driver Driver, boardID string) ([]WikiPage, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, title, slug
+		SELECT id, title, slug, body_markdown
 		FROM wiki_pages
 		WHERE board_id = %s
 		ORDER BY title, id
@@ -594,10 +974,10 @@ func loadWikiPages(ctx context.Context, q sqlQueryer, driver Driver, boardID str
 	}
 	defer rows.Close()
 
-	var pages []WikiPage
+	pages := make([]WikiPage, 0)
 	for rows.Next() {
 		var page WikiPage
-		if err := rows.Scan(&page.ID, &page.Title, &page.Slug); err != nil {
+		if err := rows.Scan(&page.ID, &page.Title, &page.Slug, &page.BodyMarkdown); err != nil {
 			return nil, err
 		}
 		pages = append(pages, page)
@@ -606,6 +986,92 @@ func loadWikiPages(ctx context.Context, q sqlQueryer, driver Driver, boardID str
 		return nil, err
 	}
 	return pages, nil
+}
+
+func loadWikiPage(ctx context.Context, q sqlQueryer, driver Driver, pageID string) (WikiPage, error) {
+	var page WikiPage
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT id, title, slug, body_markdown
+		FROM wiki_pages
+		WHERE id = %s
+	`, placeholder(driver, 1)), pageID).Scan(&page.ID, &page.Title, &page.Slug, &page.BodyMarkdown); err != nil {
+		return WikiPage{}, notFoundOrErr(err)
+	}
+	return page, nil
+}
+
+func loadCardDetail(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (CardDetail, error) {
+	card, err := loadCard(ctx, q, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	comments, err := loadCardComments(ctx, q, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+	activity, err := loadCardActivity(ctx, q, driver, cardID)
+	if err != nil {
+		return CardDetail{}, err
+	}
+
+	return CardDetail{
+		Card:     card,
+		Comments: comments,
+		Activity: activity,
+	}, nil
+}
+
+func loadCardComments(ctx context.Context, q sqlQueryer, driver Driver, cardID string) ([]CardComment, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, card_id, body, %s
+		FROM card_comments
+		WHERE card_id = %s
+		ORDER BY created_at, id
+	`, timeText(driver, "created_at"), placeholder(driver, 1)), cardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	comments := make([]CardComment, 0)
+	for rows.Next() {
+		var comment CardComment
+		if err := rows.Scan(&comment.ID, &comment.CardID, &comment.Body, &comment.CreatedAt); err != nil {
+			return nil, err
+		}
+		comments = append(comments, comment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return comments, nil
+}
+
+func loadCardActivity(ctx context.Context, q sqlQueryer, driver Driver, cardID string) ([]ActivityEvent, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, card_id, event_type, %s
+		FROM activity_events
+		WHERE card_id = %s
+		ORDER BY created_at DESC, id DESC
+	`, timeText(driver, "created_at"), placeholder(driver, 1)), cardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]ActivityEvent, 0)
+	for rows.Next() {
+		var event ActivityEvent
+		if err := rows.Scan(&event.ID, &event.CardID, &event.EventType, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		event.Summary = activitySummary(event.EventType)
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func loadCard(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (BoardCard, error) {
@@ -620,6 +1086,39 @@ func loadCard(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (
 		return BoardCard{}, notFoundOrErr(err)
 	}
 	return card, nil
+}
+
+func loadCardScope(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (string, string, error) {
+	var workspaceID string
+	var boardID string
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT boards.workspace_id, cards.board_id
+		FROM cards
+		JOIN boards ON boards.id = cards.board_id
+		WHERE cards.id = %s
+	`, placeholder(driver, 1)), cardID).Scan(&workspaceID, &boardID); err != nil {
+		return "", "", notFoundOrErr(err)
+	}
+	return workspaceID, boardID, nil
+}
+
+func appendActivity(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, boardID string, cardID string, eventType string) error {
+	eventID, err := newID()
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO activity_events (id, workspace_id, board_id, card_id, event_type, payload)
+		VALUES (%s, %s, %s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+		placeholder(driver, 5),
+		jsonPlaceholder(driver, 6),
+	), eventID, workspaceID, boardID, cardID, eventType, "{}")
+	return err
 }
 
 func loadCardOrder(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (map[string][]string, error) {
@@ -702,6 +1201,21 @@ func ownerInitials(value string) string {
 	return owner
 }
 
+func normalizePriority(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "normal":
+		return "normal", nil
+	case "low":
+		return "low", nil
+	case "high":
+		return "high", nil
+	case "urgent":
+		return "urgent", nil
+	default:
+		return "", fmt.Errorf("%w: priority must be low, normal, high, or urgent", ErrValidation)
+	}
+}
+
 func displayPriority(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "low":
@@ -713,6 +1227,95 @@ func displayPriority(value string) string {
 	default:
 		return "Normal"
 	}
+}
+
+func uniqueWikiSlug(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, excludePageID string, base string) (string, error) {
+	if base == "" {
+		base = "page"
+	}
+
+	for index := 0; index < 100; index++ {
+		slug := base
+		if index > 0 {
+			slug = fmt.Sprintf("%s-%d", base, index+1)
+		}
+
+		args := []any{workspaceID, slug}
+		query := fmt.Sprintf(
+			"SELECT id FROM wiki_pages WHERE workspace_id = %s AND slug = %s",
+			placeholder(driver, 1),
+			placeholder(driver, 2),
+		)
+		if excludePageID != "" {
+			query = fmt.Sprintf("%s AND id <> %s", query, placeholder(driver, 3))
+			args = append(args, excludePageID)
+		}
+
+		var existingID string
+		if err := q.QueryRowContext(ctx, query, args...).Scan(&existingID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return slug, nil
+			}
+			return "", err
+		}
+	}
+
+	return "", fmt.Errorf("%w: wiki slug is unavailable", ErrValidation)
+}
+
+func slugify(value string) string {
+	var builder strings.Builder
+	lastDash := false
+
+	for _, char := range strings.ToLower(strings.TrimSpace(value)) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+			lastDash = false
+			continue
+		}
+		if builder.Len() > 0 && !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(builder.String(), "-")
+}
+
+func activitySummary(eventType string) string {
+	switch eventType {
+	case "card.created":
+		return "Card created"
+	case "card.updated":
+		return "Card updated"
+	case "card.moved":
+		return "Card moved"
+	case "card.commented":
+		return "Comment added"
+	default:
+		return "Activity recorded"
+	}
+}
+
+func currentTimestamp(driver Driver) string {
+	if driver == DriverPostgres {
+		return "now()"
+	}
+	return "datetime('now')"
+}
+
+func timeText(driver Driver, column string) string {
+	if driver == DriverPostgres {
+		return column + "::text"
+	}
+	return column
+}
+
+func jsonPlaceholder(driver Driver, index int) string {
+	if driver == DriverPostgres {
+		return fmt.Sprintf("$%d::jsonb", index)
+	}
+	return "?"
 }
 
 func notFoundOrErr(err error) error {
