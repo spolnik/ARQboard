@@ -32,7 +32,14 @@ type Options struct {
 type BoardStore interface {
 	GetDefaultBoard(context.Context) (db.Board, error)
 	CreateCard(context.Context, db.CreateCardParams) (db.BoardCard, error)
+	GetCardDetail(context.Context, string) (db.CardDetail, error)
+	UpdateCard(context.Context, db.UpdateCardParams) (db.BoardCard, error)
 	MoveCard(context.Context, db.MoveCardParams) (db.Board, error)
+	CreateCardComment(context.Context, db.CreateCardCommentParams) (db.CardDetail, error)
+	ListWikiPages(context.Context) ([]db.WikiPage, error)
+	GetWikiPage(context.Context, string) (db.WikiPage, error)
+	CreateWikiPage(context.Context, db.CreateWikiPageParams) (db.WikiPage, error)
+	UpdateWikiPage(context.Context, db.UpdateWikiPageParams) (db.WikiPage, error)
 }
 
 type errorBody struct {
@@ -64,8 +71,16 @@ func NewRouter(opts Options) http.Handler {
 		})
 		r.Get("/boards/default", defaultBoard(opts.BoardStore))
 		r.Post("/cards", createCard(opts.BoardStore))
+		r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
+		r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
 		r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
 		r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
+		r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore))
+		r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore))
+		r.Get("/wiki", listWikiPages(opts.BoardStore))
+		r.Post("/wiki", createWikiPage(opts.BoardStore))
+		r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore))
+		r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore))
 	})
 
 	if opts.StaticFS != nil {
@@ -85,9 +100,26 @@ type createCardRequest struct {
 	OwnerInitials string `json:"ownerInitials"`
 }
 
+type updateCardRequest struct {
+	Title         string `json:"title"`
+	Description   string `json:"description"`
+	Priority      string `json:"priority"`
+	OwnerInitials string `json:"ownerInitials"`
+	Due           string `json:"due"`
+}
+
 type moveCardRequest struct {
 	ColumnID string `json:"columnId"`
 	Position int    `json:"position"`
+}
+
+type createCardCommentRequest struct {
+	Body string `json:"body"`
+}
+
+type wikiPageRequest struct {
+	Title        string `json:"title"`
+	BodyMarkdown string `json:"bodyMarkdown"`
 }
 
 func defaultBoard(store BoardStore) http.HandlerFunc {
@@ -138,6 +170,57 @@ func createCard(store BoardStore) http.HandlerFunc {
 	}
 }
 
+func cardDetail(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+func updateCard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload updateCardRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_card", "title is required")
+			return
+		}
+
+		card, err := store.UpdateCard(r.Context(), db.UpdateCardParams{
+			CardID:        chi.URLParam(r, "cardID"),
+			Title:         payload.Title,
+			Description:   payload.Description,
+			Priority:      payload.Priority,
+			OwnerInitials: payload.OwnerInitials,
+			Due:           payload.Due,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, card)
+	}
+}
+
 func moveCard(store BoardStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -166,6 +249,148 @@ func moveCard(store BoardStore) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, board)
+	}
+}
+
+func cardComments(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, detail.Comments)
+	}
+}
+
+func createCardComment(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload createCardCommentRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Body) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_comment", "body is required")
+			return
+		}
+
+		detail, err := store.CreateCardComment(r.Context(), db.CreateCardCommentParams{
+			CardID: chi.URLParam(r, "cardID"),
+			Body:   payload.Body,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, detail)
+	}
+}
+
+func listWikiPages(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		pages, err := store.ListWikiPages(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, pages)
+	}
+}
+
+func wikiPage(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		page, err := store.GetWikiPage(r.Context(), chi.URLParam(r, "pageID"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, page)
+	}
+}
+
+func createWikiPage(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload wikiPageRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_wiki_page", "title is required")
+			return
+		}
+
+		page, err := store.CreateWikiPage(r.Context(), db.CreateWikiPageParams{
+			Title:        payload.Title,
+			BodyMarkdown: payload.BodyMarkdown,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, page)
+	}
+}
+
+func updateWikiPage(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload wikiPageRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_wiki_page", "title is required")
+			return
+		}
+
+		page, err := store.UpdateWikiPage(r.Context(), db.UpdateWikiPageParams{
+			PageID:       chi.URLParam(r, "pageID"),
+			Title:        payload.Title,
+			BodyMarkdown: payload.BodyMarkdown,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, page)
 	}
 }
 

@@ -16,10 +16,14 @@ import {
   BookOpen,
   CalendarDays,
   CheckCircle2,
+  FilePlus2,
   GripVertical,
   LayoutDashboard,
+  MessageSquare,
   MoreHorizontal,
+  Pencil,
   Plus,
+  Save,
   Search,
   Settings,
   UserRound,
@@ -53,6 +57,28 @@ type WikiPage = {
   id: string;
   title: string;
   slug: string;
+  bodyMarkdown: string;
+};
+
+type CardComment = {
+  id: string;
+  cardId: string;
+  body: string;
+  createdAt: string;
+};
+
+type ActivityEvent = {
+  id: string;
+  cardId: string;
+  eventType: string;
+  summary: string;
+  createdAt: string;
+};
+
+type CardDetail = {
+  card: Card;
+  comments: CardComment[];
+  activity: ActivityEvent[];
 };
 
 type Board = {
@@ -63,14 +89,40 @@ type Board = {
   wikiPages: WikiPage[];
 };
 
+type CardForm = {
+  title: string;
+  description: string;
+  priority: string;
+  ownerInitials: string;
+  due: string;
+};
+
+type WikiForm = {
+  title: string;
+  bodyMarkdown: string;
+};
+
 function App() {
   const [activeView, setActiveView] = useState<View>('boards');
   const [board, setBoard] = useState<Board | null>(null);
   const [selectedCardId, setSelectedCardId] = useState('');
+  const [cardDetail, setCardDetail] = useState<CardDetail | null>(null);
+  const [isEditingCard, setIsEditingCard] = useState(false);
+  const [cardForm, setCardForm] = useState<CardForm>({
+    title: '',
+    description: '',
+    priority: 'normal',
+    ownerInitials: '',
+    due: '',
+  });
   const [search, setSearch] = useState('');
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newCardTitle, setNewCardTitle] = useState('');
   const [newCardOwner, setNewCardOwner] = useState('');
+  const [selectedWikiPage, setSelectedWikiPage] = useState<WikiPage | null>(null);
+  const [isCreatingWikiPage, setIsCreatingWikiPage] = useState(false);
+  const [wikiForm, setWikiForm] = useState<WikiForm>({ title: '', bodyMarkdown: '' });
+  const [newComment, setNewComment] = useState('');
   const [error, setError] = useState('');
 
   const sensors = useSensors(
@@ -110,9 +162,40 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!selectedCardId) {
+      setCardDetail(null);
+      return;
+    }
+
+    let cancelled = false;
+    async function loadSelectedCard() {
+      try {
+        const detail = normalizeCardDetail(await getJSON<CardDetail>(`/api/cards/${selectedCardId}`));
+        if (!cancelled) {
+          setCardDetail(detail);
+          setCardForm(formFromCard(detail.card));
+          setIsEditingCard(false);
+          setNewComment('');
+          setError('');
+        }
+      } catch {
+        if (!cancelled) {
+          setCardDetail(null);
+        }
+      }
+    }
+
+    loadSelectedCard();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCardId]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
-  const selectedCard = allCards.find((card) => card.id === selectedCardId) ?? allCards[0];
+  const boardSelectedCard = allCards.find((card) => card.id === selectedCardId) ?? allCards[0];
+  const selectedCard = cardDetail?.card.id === selectedCardId ? cardDetail.card : boardSelectedCard;
 
   const filteredColumns = useMemo(() => {
     if (!board) {
@@ -187,6 +270,130 @@ function App() {
       setError('');
     } catch {
       setError('Could not move the card.');
+    }
+  }
+
+  function startEditingCard() {
+    if (!selectedCard) {
+      return;
+    }
+    setCardForm(formFromCard(selectedCard));
+    setIsEditingCard(true);
+  }
+
+  async function updateSelectedCard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCard) {
+      return;
+    }
+
+    const payload = {
+      title: cardForm.title.trim(),
+      description: cardForm.description.trim(),
+      priority: cardForm.priority,
+      ownerInitials: ownerInitials(cardForm.ownerInitials),
+      due: cardForm.due.trim(),
+    };
+    if (!payload.title) {
+      return;
+    }
+
+    try {
+      const card = await requestJSON<Card>(`/api/cards/${selectedCard.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      setBoard((current) => replaceCardInBoard(current, card));
+      setCardDetail((current) =>
+        current && current.card.id === card.id
+          ? {
+              ...current,
+              card,
+            }
+          : {
+              card,
+              comments: [],
+              activity: [],
+            },
+      );
+      setCardForm(formFromCard(card));
+      setIsEditingCard(false);
+      setError('');
+    } catch {
+      setError('Could not update the card.');
+    }
+  }
+
+  async function createComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCard) {
+      return;
+    }
+
+    const body = newComment.trim();
+    if (!body) {
+      return;
+    }
+
+    try {
+      const detail = normalizeCardDetail(
+        await requestJSON<CardDetail>(`/api/cards/${selectedCard.id}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ body }),
+        }),
+      );
+      setCardDetail(detail);
+      setBoard((current) => replaceCardInBoard(current, detail.card));
+      setNewComment('');
+      setError('');
+    } catch {
+      setError('Could not add the comment.');
+    }
+  }
+
+  async function loadWikiPage(pageID: string) {
+    try {
+      const page = await getJSON<WikiPage>(`/api/wiki/${pageID}`);
+      setSelectedWikiPage(page);
+      setWikiForm(formFromWikiPage(page));
+      setIsCreatingWikiPage(false);
+      setActiveView('wiki');
+      setError('');
+    } catch {
+      setError('Could not load the wiki page.');
+    }
+  }
+
+  function startCreatingWikiPage() {
+    setSelectedWikiPage(null);
+    setWikiForm({ title: '', bodyMarkdown: '' });
+    setIsCreatingWikiPage(true);
+    setActiveView('wiki');
+  }
+
+  async function submitWikiPage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const payload = {
+      title: wikiForm.title.trim(),
+      bodyMarkdown: wikiForm.bodyMarkdown.trim(),
+    };
+    if (!payload.title) {
+      return;
+    }
+
+    try {
+      const url = isCreatingWikiPage || !selectedWikiPage ? '/api/wiki' : `/api/wiki/${selectedWikiPage.id}`;
+      const page = await requestJSON<WikiPage>(url, {
+        method: isCreatingWikiPage || !selectedWikiPage ? 'POST' : 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      setBoard((current) => upsertWikiPageInBoard(current, page));
+      setSelectedWikiPage(page);
+      setWikiForm(formFromWikiPage(page));
+      setIsCreatingWikiPage(false);
+      setError('');
+    } catch {
+      setError('Could not save the wiki page.');
     }
   }
 
@@ -300,18 +507,20 @@ function App() {
                 </p>
               ) : (
                 <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
-                  <section className="grid gap-3 xl:grid-cols-3" aria-label="Kanban board">
-                    {filteredColumns.map((column) => (
-                      <KanbanColumn
-                        key={column.id}
-                        column={column}
-                        allColumns={board.columns}
-                        selectedCardId={selectedCard?.id ?? ''}
-                        onMoveCard={moveCard}
-                        onSelectCard={setSelectedCardId}
-                      />
-                    ))}
-                  </section>
+                  <div className="overflow-x-auto pb-2">
+                    <section className="grid min-w-[64rem] gap-3 lg:grid-cols-4" aria-label="Kanban board">
+                      {filteredColumns.map((column) => (
+                        <KanbanColumn
+                          key={column.id}
+                          column={column}
+                          allColumns={board.columns}
+                          selectedCardId={selectedCard?.id ?? ''}
+                          onMoveCard={moveCard}
+                          onSelectCard={setSelectedCardId}
+                        />
+                      ))}
+                    </section>
+                  </div>
                 </DndContext>
               )}
             </main>
@@ -321,14 +530,168 @@ function App() {
                 <aside className="mb-5" aria-label="Card detail">
                   <div className="mb-2 flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Card detail</h2>
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" />
+                    <div className="flex items-center gap-1">
+                      <button
+                        className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        type="button"
+                        onClick={startEditingCard}
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                        Edit Card
+                      </button>
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" />
+                    </div>
                   </div>
-                  <h3 className="text-lg font-semibold leading-6">{selectedCard.title}</h3>
-                  <p className="mt-2 text-sm leading-6 text-slate-600">{selectedCard.description}</p>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-slate-600">
-                    <p>Owner {selectedCard.owner}</p>
-                    <p>Priority {selectedCard.priority}</p>
-                    <p>Due {selectedCard.due}</p>
+                  {isEditingCard ? (
+                    <form className="space-y-3" onSubmit={updateSelectedCard}>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-title">
+                          Card title
+                        </label>
+                        <input
+                          id="edit-card-title"
+                          name="title"
+                          className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                          value={cardForm.title}
+                          onChange={(event) => setCardForm((current) => ({ ...current, title: event.target.value }))}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-description">
+                          Description
+                        </label>
+                        <textarea
+                          id="edit-card-description"
+                          name="description"
+                          className="min-h-24 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                          value={cardForm.description}
+                          onChange={(event) => setCardForm((current) => ({ ...current, description: event.target.value }))}
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-priority">
+                            Priority
+                          </label>
+                          <select
+                            id="edit-card-priority"
+                            name="priority"
+                            className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-950"
+                            value={cardForm.priority}
+                            onChange={(event) => setCardForm((current) => ({ ...current, priority: event.target.value }))}
+                          >
+                            <option value="low">Low</option>
+                            <option value="normal">Normal</option>
+                            <option value="high">High</option>
+                            <option value="urgent">Urgent</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-owner">
+                            Owner initials
+                          </label>
+                          <input
+                            id="edit-card-owner"
+                            name="owner"
+                            className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm uppercase outline-none focus:border-slate-950"
+                            maxLength={3}
+                            value={cardForm.ownerInitials}
+                            onChange={(event) => setCardForm((current) => ({ ...current, ownerInitials: event.target.value }))}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-due">
+                          Due label
+                        </label>
+                        <input
+                          id="edit-card-due"
+                          name="due"
+                          className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                          value={cardForm.due}
+                          onChange={(event) => setCardForm((current) => ({ ...current, due: event.target.value }))}
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          type="button"
+                          onClick={() => setIsEditingCard(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                          type="submit"
+                        >
+                          <Save className="h-4 w-4" aria-hidden="true" />
+                          Save Card
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <h3 className="text-lg font-semibold leading-6">{selectedCard.title}</h3>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">{selectedCard.description}</p>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-slate-600">
+                        <p>Owner {selectedCard.owner}</p>
+                        <p>Priority {selectedCard.priority}</p>
+                        <p>Due {selectedCard.due}</p>
+                      </div>
+                    </>
+                  )}
+
+                  <form className="mt-5 border-t border-slate-200 pt-4" onSubmit={createComment}>
+                    <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="new-comment">
+                      New comment
+                    </label>
+                    <textarea
+                      id="new-comment"
+                      name="newComment"
+                      className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                      value={newComment}
+                      onChange={(event) => setNewComment(event.target.value)}
+                    />
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        className="inline-flex h-8 items-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
+                        type="submit"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                        Add comment
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="mt-4 space-y-3">
+                    <div>
+                      <h3 className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Comments</h3>
+                      <div className="mt-2 space-y-2">
+                        {cardDetail?.comments.length ? (
+                          cardDetail.comments.map((comment) => (
+                            <p key={comment.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                              {comment.body}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-sm text-slate-500">No comments yet</p>
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Activity</h3>
+                      <div className="mt-2 space-y-1">
+                        {cardDetail?.activity.length ? (
+                          cardDetail.activity.map((event) => (
+                            <p key={event.id} className="text-sm text-slate-600">
+                              <span className="font-medium text-slate-800">{event.eventType}</span> {event.summary}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-sm text-slate-500">No activity yet</p>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </aside>
               ) : null}
@@ -336,7 +699,12 @@ function App() {
               <aside aria-label="Wiki pages">
                 <div className="mb-2 flex items-center justify-between">
                   <h2 className="text-sm font-semibold">Wiki pages</h2>
-                  <button className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100" type="button" aria-label="Add page">
+                  <button
+                    className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100"
+                    type="button"
+                    aria-label="Add page"
+                    onClick={startCreatingWikiPage}
+                  >
                     <Plus className="mx-auto h-4 w-4" aria-hidden="true" />
                   </button>
                 </div>
@@ -347,6 +715,7 @@ function App() {
                         key={page.id}
                         className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50"
                         type="button"
+                        onClick={() => loadWikiPage(page.id)}
                       >
                         <span>{page.title}</span>
                         <BookOpen className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
@@ -363,29 +732,91 @@ function App() {
           <main className="min-w-0 p-4 lg:col-span-2">
             {activeView === 'wiki' ? (
               <section className="max-w-5xl">
-                <div className="mb-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Workspace knowledge</p>
-                  <h1 className="text-2xl font-semibold tracking-normal">Wiki pages</h1>
+                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Workspace knowledge</p>
+                    <h1 className="text-2xl font-semibold tracking-normal">Wiki pages</h1>
+                  </div>
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                    type="button"
+                    onClick={startCreatingWikiPage}
+                  >
+                    <FilePlus2 className="h-4 w-4" aria-hidden="true" />
+                    New wiki page
+                  </button>
                 </div>
                 <div className="grid gap-3 md:grid-cols-[16rem_minmax(0,1fr)]">
                   <div className="divide-y divide-slate-200 rounded-md border border-slate-200 bg-white">
-                    {filteredWikiPages.map((page) => (
-                      <button
-                        key={page.id}
-                        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50"
-                        type="button"
-                      >
-                        <span>{page.title}</span>
-                        <BookOpen className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-                      </button>
-                    ))}
+                    {filteredWikiPages.length > 0 ? (
+                      filteredWikiPages.map((page) => (
+                        <button
+                          key={page.id}
+                          className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${
+                            selectedWikiPage?.id === page.id ? 'bg-slate-100 font-medium text-slate-950' : ''
+                          }`}
+                          type="button"
+                          onClick={() => loadWikiPage(page.id)}
+                        >
+                          <span>{page.title}</span>
+                          <BookOpen className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                        </button>
+                      ))
+                    ) : (
+                      <p className="px-3 py-2 text-sm text-slate-500">No matching pages</p>
+                    )}
                   </div>
-                  <article className="rounded-md border border-slate-200 bg-white p-4">
-                    <h2 className="text-lg font-semibold">{filteredWikiPages[0]?.title ?? 'Deployment checklist'}</h2>
-                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                      Keep deployment notes close to the board so operational work and implementation work stay connected.
-                    </p>
-                  </article>
+                  <div className="rounded-md border border-slate-200 bg-white p-4">
+                    {selectedWikiPage || isCreatingWikiPage ? (
+                      <form className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" onSubmit={submitWikiPage}>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="wiki-title">
+                              Wiki title
+                            </label>
+                            <input
+                              id="wiki-title"
+                              name="title"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={wikiForm.title}
+                              onChange={(event) => setWikiForm((current) => ({ ...current, title: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="wiki-body">
+                              Markdown body
+                            </label>
+                            <textarea
+                              id="wiki-body"
+                              name="bodyMarkdown"
+                              className="min-h-72 w-full resize-y rounded-md border border-slate-200 px-3 py-2 font-mono text-sm outline-none focus:border-slate-950"
+                              value={wikiForm.bodyMarkdown}
+                              onChange={(event) => setWikiForm((current) => ({ ...current, bodyMarkdown: event.target.value }))}
+                            />
+                          </div>
+                          <div className="flex justify-end">
+                            <button
+                              className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                              type="submit"
+                            >
+                              <Save className="h-4 w-4" aria-hidden="true" />
+                              {isCreatingWikiPage ? 'Create page' : 'Save page'}
+                            </button>
+                          </div>
+                        </div>
+                        <article className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-4">
+                          <MarkdownPreview markdown={wikiForm.bodyMarkdown} />
+                        </article>
+                      </form>
+                    ) : (
+                      <article className="text-sm leading-6 text-slate-600">
+                        <h2 className="text-lg font-semibold text-slate-950">Select a page</h2>
+                        <p className="mt-2">
+                          Select a page to edit markdown, or create a new runbook directly inside the workspace wiki.
+                        </p>
+                      </article>
+                    )}
+                  </div>
                 </div>
               </section>
             ) : (
@@ -629,6 +1060,14 @@ function NavButton({
   );
 }
 
+async function getJSON<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 async function requestJSON<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -652,7 +1091,18 @@ function normalizeBoard(board: Board): Board {
         ...column,
         cards: [...(column.cards ?? [])].sort((left, right) => left.position - right.position),
       })),
-    wikiPages: board.wikiPages ?? [],
+    wikiPages: (board.wikiPages ?? []).map((page) => ({
+      ...page,
+      bodyMarkdown: page.bodyMarkdown ?? '',
+    })),
+  };
+}
+
+function normalizeCardDetail(detail: CardDetail): CardDetail {
+  return {
+    ...detail,
+    comments: detail.comments ?? [],
+    activity: detail.activity ?? [],
   };
 }
 
@@ -677,6 +1127,53 @@ function addCardToBoard(board: Board | null, card: Card): Board | null {
         : column,
     ),
   });
+}
+
+function replaceCardInBoard(board: Board | null, card: Card): Board | null {
+  if (!board) {
+    return board;
+  }
+
+  return normalizeBoard({
+    ...board,
+    columns: board.columns.map((column) => ({
+      ...column,
+      cards: column.cards.map((candidate) => (candidate.id === card.id ? card : candidate)),
+    })),
+  });
+}
+
+function upsertWikiPageInBoard(board: Board | null, page: WikiPage): Board | null {
+  if (!board) {
+    return board;
+  }
+
+  const exists = board.wikiPages.some((candidate) => candidate.id === page.id);
+  const wikiPages = exists
+    ? board.wikiPages.map((candidate) => (candidate.id === page.id ? page : candidate))
+    : [...board.wikiPages, page];
+
+  return {
+    ...board,
+    wikiPages: [...wikiPages].sort((left, right) => left.title.localeCompare(right.title)),
+  };
+}
+
+function formFromCard(card: Card): CardForm {
+  return {
+    title: card.title,
+    description: card.description,
+    priority: card.priority.toLowerCase(),
+    ownerInitials: card.owner,
+    due: card.due,
+  };
+}
+
+function formFromWikiPage(page: WikiPage): WikiForm {
+  return {
+    title: page.title,
+    bodyMarkdown: page.bodyMarkdown ?? '',
+  };
 }
 
 function resolveMoveTarget(board: Board, overId: string) {
@@ -731,6 +1228,69 @@ function cardMatchesSearch(card: Card, search: string) {
 function ownerInitials(value: string) {
   const owner = value.trim().toUpperCase();
   return owner || 'ME';
+}
+
+function MarkdownPreview({ markdown }: { markdown: string }) {
+  const lines = markdown.split(/\r?\n/);
+  const nodes: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      const text = heading[2];
+      const className = level === 1 ? 'text-xl font-semibold' : 'text-lg font-semibold';
+      nodes.push(
+        level === 1 ? (
+          <h2 key={`heading-${index}`} className={className}>
+            {text}
+          </h2>
+        ) : (
+          <h3 key={`heading-${index}`} className={className}>
+            {text}
+          </h3>
+        ),
+      );
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith('- ')) {
+      const items: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith('- ')) {
+        items.push(lines[index].trim().slice(2));
+        index += 1;
+      }
+      nodes.push(
+        <ul key={`list-${index}`} className="list-disc space-y-1 pl-5 text-sm text-slate-700">
+          {items.map((item, itemIndex) => (
+            <li key={`${item}-${itemIndex}`}>{item}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [];
+    while (index < lines.length && lines[index].trim() && !lines[index].trim().startsWith('- ')) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    nodes.push(
+      <p key={`paragraph-${index}`} className="text-sm leading-6 text-slate-700">
+        {paragraph.join(' ')}
+      </p>,
+    );
+  }
+
+  return <div className="space-y-3">{nodes.length ? nodes : <p className="text-sm text-slate-500">No content yet</p>}</div>;
 }
 
 export default App;
