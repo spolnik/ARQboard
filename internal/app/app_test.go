@@ -3,9 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestRunReportsUsageAndUnknownCommands(t *testing.T) {
@@ -91,6 +94,53 @@ func TestRunServeRejectsInvalidConfigBeforeListening(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "DATABASE_URL") {
 		t.Fatalf("stderr = %q, want database config error", stderr.String())
+	}
+}
+
+func TestRunMCPRejectsInvalidConfigBeforeConnecting(t *testing.T) {
+	lookup := mapLookup(map[string]string{"APP_ENV": "production"})
+
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{"mcp"}, lookup, nil, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "DATABASE_URL") {
+		t.Fatalf("stderr = %q, want database config error", stderr.String())
+	}
+}
+
+func TestPrepareDatabaseRunsMigrationsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+
+	if err := prepareDatabase(ctx, databaseURL); err != nil {
+		t.Fatalf("prepareDatabase returned error: %v", err)
+	}
+	if err := prepareDatabase(ctx, databaseURL); err != nil {
+		t.Fatalf("second prepareDatabase returned error: %v", err)
+	}
+
+	sqlDB, err := sql.Open("sqlite", strings.TrimPrefix(databaseURL, "sqlite://"))
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var boardTable string
+	if err := sqlDB.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'boards'").Scan(&boardTable); err != nil {
+		t.Fatalf("boards table lookup returned error: %v", err)
+	}
+	if boardTable != "boards" {
+		t.Fatalf("board table = %q, want boards", boardTable)
+	}
+
+	var versions int
+	if err := sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM goose_db_version WHERE is_applied = 1").Scan(&versions); err != nil {
+		t.Fatalf("goose version lookup returned error: %v", err)
+	}
+	if versions == 0 {
+		t.Fatal("goose version table has no applied migrations")
 	}
 }
 

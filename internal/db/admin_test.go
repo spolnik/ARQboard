@@ -301,6 +301,67 @@ func TestReadinessChecker(t *testing.T) {
 	}
 }
 
+func TestSQLiteSchemaUsesUUIDPrimaryKeysForApplicationTables(t *testing.T) {
+	conn := openMigratedSQLite(t)
+	defer conn.Close()
+
+	tables := []string{
+		"users",
+		"sessions",
+		"workspaces",
+		"workspace_members",
+		"boards",
+		"board_members",
+		"columns",
+		"cards",
+		"card_comments",
+		"activity_events",
+		"wiki_pages",
+	}
+
+	for _, table := range tables {
+		t.Run(table, func(t *testing.T) {
+			rows, err := conn.SQL.Query("PRAGMA table_info(" + table + ")")
+			if err != nil {
+				t.Fatalf("PRAGMA table_info returned error: %v", err)
+			}
+			defer rows.Close()
+
+			var primaryKeyColumn string
+			var primaryKeyType string
+			var primaryKeyCount int
+			for rows.Next() {
+				var cid int
+				var name string
+				var columnType string
+				var notNull int
+				var defaultValue any
+				var primaryKeyPosition int
+				if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKeyPosition); err != nil {
+					t.Fatalf("table info scan returned error: %v", err)
+				}
+				if primaryKeyPosition > 0 {
+					primaryKeyCount++
+					primaryKeyColumn = name
+					primaryKeyType = columnType
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("table info rows returned error: %v", err)
+			}
+			if primaryKeyCount != 1 {
+				t.Fatalf("primary key column count = %d, want 1", primaryKeyCount)
+			}
+			if primaryKeyColumn != "id" {
+				t.Fatalf("primary key column = %q, want id", primaryKeyColumn)
+			}
+			if primaryKeyType != "uuid" {
+				t.Fatalf("primary key type = %q, want uuid", primaryKeyType)
+			}
+		})
+	}
+}
+
 func TestDriverAndSQLiteHelpers(t *testing.T) {
 	if DriverForURL("postgres://user:pass@localhost/db") != DriverPostgres {
 		t.Fatal("postgres URL did not select postgres driver")

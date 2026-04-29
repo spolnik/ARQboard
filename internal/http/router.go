@@ -32,6 +32,12 @@ type Options struct {
 
 type BoardStore interface {
 	GetDefaultBoard(context.Context) (db.Board, error)
+	ListWorkspaces(context.Context) ([]db.Workspace, error)
+	ListBoards(context.Context) ([]db.BoardSummary, error)
+	GetBoard(context.Context, string) (db.Board, error)
+	CreateBoard(context.Context, db.CreateBoardParams) (db.Board, error)
+	CreateColumn(context.Context, db.CreateColumnParams) (db.Board, error)
+	UpdateColumn(context.Context, db.UpdateColumnParams) (db.Board, error)
 	CreateCard(context.Context, db.CreateCardParams) (db.BoardCard, error)
 	GetCardDetail(context.Context, string) (db.CardDetail, error)
 	UpdateCard(context.Context, db.UpdateCardParams) (db.BoardCard, error)
@@ -82,7 +88,13 @@ func NewRouter(opts Options) http.Handler {
 			if opts.AuthStore != nil {
 				r.Use(requireAuth(opts.AuthStore))
 			}
+			r.Get("/workspaces", listWorkspaces(opts.BoardStore))
+			r.Get("/boards", listBoards(opts.BoardStore))
+			r.Post("/boards", createBoard(opts.BoardStore))
 			r.Get("/boards/default", defaultBoard(opts.BoardStore))
+			r.Get("/boards/{boardID}", boardByID(opts.BoardStore))
+			r.Post("/boards/{boardID}/columns", createColumn(opts.BoardStore))
+			r.Patch("/columns/{columnID}", updateColumn(opts.BoardStore))
 			r.Post("/cards", createCard(opts.BoardStore))
 			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
 			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
@@ -114,6 +126,14 @@ type createCardRequest struct {
 	OwnerInitials string `json:"ownerInitials"`
 }
 
+type boardRequest struct {
+	Name string `json:"name"`
+}
+
+type columnRequest struct {
+	Title string `json:"title"`
+}
+
 type updateCardRequest struct {
 	Title         string `json:"title"`
 	Description   string `json:"description"`
@@ -143,6 +163,8 @@ type loginRequest struct {
 
 const sessionCookieName = "arqboard_session"
 
+type loggerContextKey struct{}
+
 func login(store AuthStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -165,7 +187,7 @@ func login(store AuthStore) http.HandlerFunc {
 			Password: payload.Password,
 		})
 		if err != nil {
-			writeAuthError(w, err)
+			writeAuthError(w, r, err)
 			return
 		}
 
@@ -189,7 +211,7 @@ func currentUser(store AuthStore) http.HandlerFunc {
 
 		user, err := store.CurrentUser(r.Context(), cookie.Value)
 		if err != nil {
-			writeAuthError(w, err)
+			writeAuthError(w, r, err)
 			return
 		}
 
@@ -206,7 +228,7 @@ func logout(store AuthStore) http.HandlerFunc {
 				return
 			}
 			if err := store.Logout(r.Context(), cookie.Value); err != nil {
-				writeAuthError(w, err)
+				writeAuthError(w, r, err)
 				return
 			}
 		}
@@ -225,7 +247,7 @@ func requireAuth(store AuthStore) func(http.Handler) http.Handler {
 				return
 			}
 			if _, err := store.CurrentUser(r.Context(), cookie.Value); err != nil {
-				writeAuthError(w, err)
+				writeAuthError(w, r, err)
 				return
 			}
 
@@ -243,7 +265,145 @@ func defaultBoard(store BoardStore) http.HandlerFunc {
 
 		board, err := store.GetDefaultBoard(r.Context())
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, board)
+	}
+}
+
+func listWorkspaces(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		workspaces, err := store.ListWorkspaces(r.Context())
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, workspaces)
+	}
+}
+
+func listBoards(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		boards, err := store.ListBoards(r.Context())
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, boards)
+	}
+}
+
+func boardByID(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		board, err := store.GetBoard(r.Context(), chi.URLParam(r, "boardID"))
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, board)
+	}
+}
+
+func createBoard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload boardRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Name) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_board", "name is required")
+			return
+		}
+
+		board, err := store.CreateBoard(r.Context(), db.CreateBoardParams{Name: payload.Name})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, board)
+	}
+}
+
+func createColumn(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload columnRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_column", "title is required")
+			return
+		}
+
+		board, err := store.CreateColumn(r.Context(), db.CreateColumnParams{
+			BoardID: chi.URLParam(r, "boardID"),
+			Title:   payload.Title,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, board)
+	}
+}
+
+func updateColumn(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload columnRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_column", "title is required")
+			return
+		}
+
+		board, err := store.UpdateColumn(r.Context(), db.UpdateColumnParams{
+			ColumnID: chi.URLParam(r, "columnID"),
+			Title:    payload.Title,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -274,7 +434,7 @@ func createCard(store BoardStore) http.HandlerFunc {
 			OwnerInitials: payload.OwnerInitials,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -291,7 +451,7 @@ func cardDetail(store BoardStore) http.HandlerFunc {
 
 		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -325,7 +485,7 @@ func updateCard(store BoardStore) http.HandlerFunc {
 			Due:           payload.Due,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -356,7 +516,7 @@ func moveCard(store BoardStore) http.HandlerFunc {
 			Position: payload.Position,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -373,7 +533,7 @@ func cardComments(store BoardStore) http.HandlerFunc {
 
 		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -403,7 +563,7 @@ func createCardComment(store BoardStore) http.HandlerFunc {
 			Body:   payload.Body,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -420,7 +580,7 @@ func listWikiPages(store BoardStore) http.HandlerFunc {
 
 		pages, err := store.ListWikiPages(r.Context())
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -437,7 +597,7 @@ func wikiPage(store BoardStore) http.HandlerFunc {
 
 		page, err := store.GetWikiPage(r.Context(), chi.URLParam(r, "pageID"))
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -467,7 +627,7 @@ func createWikiPage(store BoardStore) http.HandlerFunc {
 			BodyMarkdown: payload.BodyMarkdown,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -498,7 +658,7 @@ func updateWikiPage(store BoardStore) http.HandlerFunc {
 			BodyMarkdown: payload.BodyMarkdown,
 		})
 		if err != nil {
-			writeStoreError(w, err)
+			writeStoreError(w, r, err)
 			return
 		}
 
@@ -517,6 +677,7 @@ func readyz(readiness Readiness) http.HandlerFunc {
 		defer cancel()
 
 		if err := readiness.Ready(ctx); err != nil {
+			logRequestFailure(r, "readiness", http.StatusServiceUnavailable, "not_ready", err)
 			writeError(w, http.StatusServiceUnavailable, "not_ready", "service is not ready")
 			return
 		}
@@ -581,10 +742,19 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			next.ServeHTTP(w, r)
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			ctx := context.WithValue(r.Context(), loggerContextKey{}, logger)
+			next.ServeHTTP(ww, r.WithContext(ctx))
+			status := ww.Status()
+			if status == 0 {
+				status = http.StatusOK
+			}
 			logger.Info("request",
 				"method", r.Method,
 				"path", r.URL.Path,
+				"request_id", middleware.GetReqID(r.Context()),
+				"status", status,
+				"bytes", ww.BytesWritten(),
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
 		})
@@ -600,28 +770,63 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 	})
 }
 
-func writeStoreError(w http.ResponseWriter, err error) {
+func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	status := http.StatusInternalServerError
+	code := "internal_error"
+	message := "request failed"
 	switch {
 	case errors.Is(err, db.ErrValidation):
-		writeError(w, http.StatusBadRequest, "invalid_request", "request validation failed")
+		status = http.StatusBadRequest
+		code = "invalid_request"
+		message = "request validation failed"
 	case errors.Is(err, db.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found", "resource not found")
+		status = http.StatusNotFound
+		code = "not_found"
+		message = "resource not found"
 	case errors.Is(err, db.ErrDatabaseUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
-	default:
-		writeError(w, http.StatusInternalServerError, "internal_error", "request failed")
+		status = http.StatusServiceUnavailable
+		code = "store_unavailable"
+		message = "board store is unavailable"
 	}
+	logRequestFailure(r, "board_store", status, code, err)
+	writeError(w, status, code, message)
 }
 
-func writeAuthError(w http.ResponseWriter, err error) {
+func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	status := http.StatusInternalServerError
+	code := "internal_error"
+	message := "request failed"
 	switch {
 	case errors.Is(err, db.ErrInvalidCredentials), errors.Is(err, db.ErrUnauthenticated):
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "invalid credentials")
+		status = http.StatusUnauthorized
+		code = "unauthenticated"
+		message = "invalid credentials"
 	case errors.Is(err, db.ErrDatabaseUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
-	default:
-		writeError(w, http.StatusInternalServerError, "internal_error", "request failed")
+		status = http.StatusServiceUnavailable
+		code = "store_unavailable"
+		message = "auth store is unavailable"
 	}
+	logRequestFailure(r, "auth_store", status, code, err)
+	writeError(w, status, code, message)
+}
+
+func logRequestFailure(r *http.Request, component string, status int, code string, err error) {
+	if status < http.StatusInternalServerError || r == nil || err == nil {
+		return
+	}
+	logger, ok := r.Context().Value(loggerContextKey{}).(*slog.Logger)
+	if !ok || logger == nil {
+		return
+	}
+	logger.Error("request failed",
+		"component", component,
+		"status", status,
+		"code", code,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"request_id", middleware.GetReqID(r.Context()),
+		"error", err.Error(),
+	)
 }
 
 func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
-import App from './App';
+import App, { resolveMoveTarget } from './App';
 
 const userFixture = {
   id: 'user-1',
@@ -75,7 +75,68 @@ const boardFixture = {
   wikiPages: [
     { id: 'wiki-1', title: 'Deployment checklist', slug: 'deployment-checklist', bodyMarkdown: '# Deploy\n\n- Build image' },
     { id: 'wiki-2', title: 'Onboarding notes', slug: 'onboarding-notes', bodyMarkdown: 'Welcome aboard.' },
+    {
+      id: 'wiki-3',
+      title: 'Engineering/Runbooks/Deploy',
+      slug: 'engineering-runbooks-deploy',
+      bodyMarkdown: '# Deploy\n\nUse the release checklist.',
+    },
   ],
+};
+
+const boardSummaries = [
+  {
+    id: 'board-1',
+    workspaceId: 'workspace-1',
+    name: 'Platform Board',
+    slug: 'platform',
+    columnCount: 4,
+    cardCount: 3,
+  },
+  {
+    id: 'board-release',
+    workspaceId: 'workspace-1',
+    name: 'Release Train',
+    slug: 'release-train',
+    columnCount: 4,
+    cardCount: 0,
+  },
+];
+
+const releaseBoardFixture = {
+  id: 'board-release',
+  name: 'Release Train',
+  slug: 'release-train',
+  columns: [
+    { id: 'release-planned', title: 'Planned', position: 0, cards: [] },
+    { id: 'release-progress', title: 'In progress', position: 1, cards: [] },
+    { id: 'release-review', title: 'Ready for review', position: 2, cards: [] },
+    { id: 'release-done', title: 'Done', position: 3, cards: [] },
+  ],
+  wikiPages: [],
+};
+
+const createdBoardFixture = {
+  id: 'board-security',
+  name: 'Security Backlog',
+  slug: 'security-backlog',
+  columns: [
+    { id: 'security-planned', title: 'Planned', position: 0, cards: [] },
+    { id: 'security-progress', title: 'In progress', position: 1, cards: [] },
+    { id: 'security-review', title: 'Ready for review', position: 2, cards: [] },
+    { id: 'security-done', title: 'Done', position: 3, cards: [] },
+  ],
+  wikiPages: [],
+};
+
+const boardWithBlockedColumn = {
+  ...boardFixture,
+  columns: [...boardFixture.columns, { id: 'column-blocked', title: 'Blocked', position: 4, cards: [] }],
+};
+
+const boardWithRenamedColumn = {
+  ...boardFixture,
+  columns: boardFixture.columns.map((column) => (column.id === 'column-planned' ? { ...column, title: 'Backlog' } : column)),
 };
 
 const createdCard = {
@@ -165,8 +226,23 @@ describe('App', () => {
         if (url === '/api/auth/logout' && init?.method === 'POST') {
           return new Response(null, { status: 204 });
         }
-        if (url === '/api/boards/default') {
+        if (url === '/api/boards' && init?.method === 'POST') {
+          return jsonResponse(createdBoardFixture, 201);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
           return jsonResponse(boardFixture);
+        }
+        if (url === '/api/boards/board-release') {
+          return jsonResponse(releaseBoardFixture);
+        }
+        if (url === '/api/boards/board-1/columns' && init?.method === 'POST') {
+          return jsonResponse(boardWithBlockedColumn, 201);
+        }
+        if (url === '/api/columns/column-planned' && init?.method === 'PATCH') {
+          return jsonResponse(boardWithRenamedColumn);
         }
         if (url === '/api/cards' && init?.method === 'POST') {
           return jsonResponse(createdCard, 201);
@@ -198,6 +274,9 @@ describe('App', () => {
         if (url === '/api/wiki/wiki-1' && !init?.method) {
           return jsonResponse(boardFixture.wikiPages[0]);
         }
+        if (url === '/api/wiki/wiki-3' && !init?.method) {
+          return jsonResponse(boardFixture.wikiPages[2]);
+        }
         if (url === '/api/wiki/wiki-1' && init?.method === 'PATCH') {
           return jsonResponse(updatedWikiPage);
         }
@@ -211,15 +290,50 @@ describe('App', () => {
     vi.unstubAllGlobals();
   });
 
+  it('shows the loading screen while the session check is pending', async () => {
+    let resolveSession: (response: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/me') {
+        return new Promise<Response>((resolve) => {
+          resolveSession = resolve;
+        });
+      }
+      if (url === '/api/boards') {
+        return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/boards/board-1') {
+        return jsonResponse(boardFixture);
+      }
+      if (url === '/api/cards/card-2') {
+        return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    expect(screen.getByText(/loading workspace/i)).toBeInTheDocument();
+    resolveSession(jsonResponse(userFixture));
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
   it('loads the board and wiki workspace surface from the API', async () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /drag wire auth session cookie flow/i })).toBeInTheDocument();
+    const taskCard = screen.getByRole('button', { name: /view card wire auth session cookie flow/i });
+    expect(taskCard).toHaveClass('cursor-grab');
+    expect(screen.getByLabelText(/priority high/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/due apr 30/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /drag wire auth session cookie flow/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /move wire auth session cookie flow to in progress/i })).not.toBeInTheDocument();
     expect(screen.getByText('Ready for review')).toBeInTheDocument();
     expect(screen.getByRole('region', { name: /done column/i })).toBeInTheDocument();
     expect(screen.getAllByText('Deployment checklist').length).toBeGreaterThan(0);
-    expect(fetch).toHaveBeenCalledWith('/api/boards/default');
+    expect(fetch).toHaveBeenCalledWith('/api/boards');
+    expect(fetch).toHaveBeenCalledWith('/api/boards/board-1');
   });
 
   it('shows a helpful error when the board cannot load', async () => {
@@ -229,6 +343,9 @@ describe('App', () => {
         const url = String(input);
         if (url === '/api/me') {
           return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
         }
         return jsonResponse({ error: { code: 'not_ready' } }, 500);
       }),
@@ -255,7 +372,10 @@ describe('App', () => {
         if (url === '/api/me') {
           return jsonResponse(userFixture);
         }
-        if (url === '/api/boards/default') {
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
           return jsonResponse(lowPriorityBoard);
         }
         if (url === '/api/cards/card-1') {
@@ -267,7 +387,7 @@ describe('App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText('Low')).toBeInTheDocument();
+    expect(await screen.findByLabelText(/priority low/i)).toBeInTheDocument();
   });
 
   it('shows login before loading the workspace and signs in with admin credentials', async () => {
@@ -279,7 +399,10 @@ describe('App', () => {
       if (url === '/api/auth/login' && init?.method === 'POST') {
         return jsonResponse(userFixture);
       }
-      if (url === '/api/boards/default') {
+      if (url === '/api/boards') {
+        return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/boards/board-1') {
         return jsonResponse(boardFixture);
       }
       if (url === '/api/cards/card-2') {
@@ -292,7 +415,7 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('button', { name: /sign in/i })).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/boards/default');
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/boards');
 
     fireEvent.change(screen.getByLabelText(/email/i), {
       target: { value: 'admin@example.com' },
@@ -363,6 +486,20 @@ describe('App', () => {
     expect(fetchMock).not.toHaveBeenCalledWith('/api/auth/login', expect.anything());
   });
 
+  it('shows a session check error when the current user request fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('network unavailable');
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/could not check your session/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+  });
+
   it('signs out and returns to the login form', async () => {
     render(<App />);
 
@@ -397,7 +534,10 @@ describe('App', () => {
         if (url === '/api/me') {
           return jsonResponse(userFixture);
         }
-        if (url === '/api/boards/default') {
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
           return jsonResponse(fallbackBoard);
         }
         if (url === '/api/cards/card-1') {
@@ -422,7 +562,10 @@ describe('App', () => {
         if (url === '/api/me') {
           return jsonResponse(userFixture);
         }
-        if (url === '/api/boards/default') {
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
           return jsonResponse(emptyBoard);
         }
         throw new Error(`Unexpected fetch ${url}`);
@@ -438,6 +581,283 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /create card/i }));
 
     expect(await screen.findByText(/this board has no columns/i)).toBeInTheDocument();
+  });
+
+  it('switches between boards from the board selector', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Board'), {
+      target: { value: 'board-release' },
+    });
+
+    expect(await screen.findByRole('heading', { name: /release train/i })).toBeInTheDocument();
+    expect(screen.getAllByText('No matches').length).toBeGreaterThan(0);
+    expect(fetch).toHaveBeenCalledWith('/api/boards/board-release');
+  });
+
+  it('creates a new board and selects it', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
+    fireEvent.change(screen.getByLabelText(/board name/i), {
+      target: { value: 'Security Backlog' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create board/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/boards',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ name: 'Security Backlog' }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole('heading', { name: /security backlog/i })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /create board/i })).not.toBeInTheDocument();
+  });
+
+  it('adds and renames board columns', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /add column/i }));
+    fireEvent.change(screen.getByLabelText(/column title/i), {
+      target: { value: 'Blocked' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^add column$/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/boards/board-1/columns',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ title: 'Blocked' }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('region', { name: /blocked column/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /rename planned/i }));
+    fireEvent.change(screen.getByLabelText(/column title/i), {
+      target: { value: 'Backlog' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save column/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/columns/column-planned',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ title: 'Backlog' }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('region', { name: /backlog column/i })).toBeInTheDocument();
+  });
+
+  it('keeps the workspace usable when no boards exist yet', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /loading board/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /no boards/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /new card/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /open add column/i })).toBeDisabled();
+  });
+
+  it('returns to login when the board list request is unauthenticated', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse({ error: { code: 'unauthenticated' } }, 401);
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /platform board/i })).not.toBeInTheDocument();
+  });
+
+  it('shows errors when board and column management requests fail', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/me') {
+        return jsonResponse(userFixture);
+      }
+      if (url === '/api/boards' && init?.method === 'POST') {
+        return jsonResponse({ error: { code: 'unavailable' } }, 500);
+      }
+      if (url === '/api/boards') {
+        return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/boards/board-1') {
+        return jsonResponse(boardFixture);
+      }
+      if (url === '/api/cards/card-2') {
+        return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+      }
+      if (url === '/api/boards/board-1/columns' && init?.method === 'POST') {
+        return jsonResponse({ error: { code: 'unavailable' } }, 500);
+      }
+      if (url === '/api/columns/column-planned' && init?.method === 'PATCH') {
+        return jsonResponse({ error: { code: 'unavailable' } }, 500);
+      }
+      throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
+    fireEvent.change(screen.getByLabelText(/board name/i), {
+      target: { value: 'Security Backlog' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create board/i }));
+    expect(await screen.findByText(/could not create the board/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    fireEvent.click(screen.getByRole('button', { name: /add column/i }));
+    fireEvent.change(screen.getByLabelText(/column title/i), {
+      target: { value: 'Blocked' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^add column$/i }));
+    expect(await screen.findByText(/could not add the column/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    fireEvent.click(screen.getByRole('button', { name: /rename planned/i }));
+    fireEvent.change(screen.getByLabelText(/column title/i), {
+      target: { value: 'Backlog' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save column/i }));
+    expect(await screen.findByText(/could not rename the column/i)).toBeInTheDocument();
+  });
+
+  it('shows errors when card management requests fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
+          return jsonResponse(boardFixture);
+        }
+        if (url === '/api/cards' && init?.method === 'POST') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        if (url === '/api/cards/card-2' && !init?.method) {
+          return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+        }
+        if (url === '/api/cards/card-2/move' && init?.method === 'PATCH') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        if (url === '/api/cards/card-1' && !init?.method) {
+          return jsonResponse(cardDetail);
+        }
+        if (url === '/api/cards/card-1' && init?.method === 'PATCH') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        if (url === '/api/cards/card-1/comments' && init?.method === 'POST') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /new card/i }));
+    fireEvent.change(screen.getByLabelText(/card title/i), {
+      target: { value: 'Cannot save' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create card/i }));
+    expect(await screen.findByText(/could not create the card/i)).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog', { name: /create card/i })).getByRole('button', { name: /cancel/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /view card wire auth session cookie flow/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /edit card/i }));
+    const detail = screen.getByRole('complementary', { name: /card detail/i });
+    fireEvent.change(within(detail).getByLabelText(/card title/i), {
+      target: { value: 'Cannot update' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save card/i }));
+    expect(await screen.findByText(/could not update the card/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/new comment/i), {
+      target: { value: 'This will fail.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /add comment/i }));
+    expect(await screen.findByText(/could not add the comment/i)).toBeInTheDocument();
+  });
+
+  it('shows errors when wiki page requests fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
+          return jsonResponse(boardFixture);
+        }
+        if (url === '/api/cards/card-2') {
+          return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+        }
+        if (url === '/api/wiki/wiki-1') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        if (url === '/api/wiki' && init?.method === 'POST') {
+          return jsonResponse({ error: { code: 'unavailable' } }, 500);
+        }
+        throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /deployment checklist/i }));
+    expect(await screen.findByText(/could not load the wiki page/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
+    fireEvent.change(screen.getByLabelText(/wiki title/i), {
+      target: { value: 'Failed runbook' },
+    });
+    fireEvent.change(screen.getByLabelText(/markdown body/i), {
+      target: { value: '# Failed runbook' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create page/i }));
+    expect(await screen.findByText(/could not save the wiki page/i)).toBeInTheDocument();
   });
 
   it('updates the card detail panel when a card is selected', async () => {
@@ -456,19 +876,20 @@ describe('App', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /view card wire auth session cookie flow/i }));
     fireEvent.click(await screen.findByRole('button', { name: /edit card/i }));
-    fireEvent.change(screen.getByLabelText(/card title/i), {
+    const detail = screen.getByRole('complementary', { name: /card detail/i });
+    fireEvent.change(within(detail).getByLabelText(/card title/i), {
       target: { value: 'Wire production auth flow' },
     });
-    fireEvent.change(screen.getByLabelText(/description/i), {
+    fireEvent.change(within(detail).getByLabelText(/description/i), {
       target: { value: 'Document cookie boundaries and refresh behavior.' },
     });
-    fireEvent.change(screen.getByLabelText(/priority/i), {
+    fireEvent.change(within(detail).getByLabelText(/priority/i), {
       target: { value: 'urgent' },
     });
-    fireEvent.change(screen.getByLabelText(/owner initials/i), {
+    fireEvent.change(within(detail).getByLabelText(/owner initials/i), {
       target: { value: 'QA' },
     });
-    fireEvent.change(screen.getByLabelText(/due label/i), {
+    fireEvent.change(within(detail).getByLabelText(/due label/i), {
       target: { value: 'May 9' },
     });
     fireEvent.click(screen.getByRole('button', { name: /save card/i }));
@@ -546,26 +967,27 @@ describe('App', () => {
     expect(screen.getByText(/Owner QA/)).toBeInTheDocument();
   });
 
-  it('persists card movement when a card is moved to another column', async () => {
+  it('removes legacy arrow movement controls from cards', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /move wire auth session cookie flow to in progress/i }));
+    await screen.findByRole('button', { name: /view card wire auth session cookie flow/i });
 
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        '/api/cards/card-1/move',
-        expect.objectContaining({
-          method: 'PATCH',
-          body: JSON.stringify({
-            columnId: 'column-progress',
-            position: 1,
-          }),
-        }),
-      ),
-    );
+    expect(screen.queryByRole('button', { name: /move wire auth session cookie flow to in progress/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /move ready for review api shape to planned/i })).not.toBeInTheDocument();
+  });
 
-    const progressColumn = screen.getByRole('region', { name: /in progress column/i });
-    expect(within(progressColumn).getByText('Wire auth session cookie flow')).toBeInTheDocument();
+  it('resolves drag targets for columns, cards, and invalid drops', () => {
+    const board = boardFixture as Parameters<typeof resolveMoveTarget>[0];
+
+    expect(resolveMoveTarget(board, 'column-progress')).toEqual({
+      columnId: 'column-progress',
+      position: 1,
+    });
+    expect(resolveMoveTarget(board, 'card-3')).toEqual({
+      columnId: 'column-review',
+      position: 0,
+    });
+    expect(resolveMoveTarget(board, 'missing-target')).toBeNull();
   });
 
   it('filters cards and wiki pages with workspace search', async () => {
@@ -651,6 +1073,45 @@ describe('App', () => {
       ),
     );
     expect(screen.getByRole('button', { name: /release runbook/i })).toBeInTheDocument();
+  });
+
+  it('renders wiki pages as a tree and opens nested pages', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+
+    const tree = screen.getByRole('navigation', { name: /wiki page tree/i });
+    expect(within(tree).getByText('Engineering')).toBeInTheDocument();
+    expect(within(tree).getByText('Runbooks')).toBeInTheDocument();
+
+    fireEvent.click(within(tree).getByRole('button', { name: /open wiki page engineering\/runbooks\/deploy/i }));
+
+    expect(await screen.findByRole('heading', { name: /^deploy$/i })).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith('/api/wiki/wiki-3');
+  });
+
+  it('renders rich markdown safely in the wiki preview', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
+    fireEvent.change(screen.getByLabelText(/markdown body/i), {
+      target: {
+        value:
+          '# Deploy runbook\n\nUse **bold checks**, _careful rollout_, [release docs](https://example.com/runbook), and `kubectl`.\n\n> Pause if readiness fails.\n\n1. Build image\n2. Run smoke test\n\n```bash\ngo test ./...\n```\n\n---\n\n<script>alert("x")</script>',
+      },
+    });
+
+    const preview = screen.getByRole('article', { name: /markdown preview/i });
+    expect(within(preview).getByRole('heading', { name: /deploy runbook/i })).toBeInTheDocument();
+    expect(within(preview).getByText('bold checks').tagName).toBe('STRONG');
+    expect(within(preview).getByText('careful rollout').tagName).toBe('EM');
+    expect(within(preview).getByRole('link', { name: /release docs/i })).toHaveAttribute('href', 'https://example.com/runbook');
+    expect(within(preview).getByText('kubectl').tagName).toBe('CODE');
+    expect(within(preview).getByText('Pause if readiness fails.').closest('blockquote')).not.toBeNull();
+    expect(within(preview).getByText('Build image').closest('ol')).not.toBeNull();
+    expect(within(preview).getByText('go test ./...').closest('pre')).not.toBeNull();
+    expect(preview.querySelector('script')).toBeNull();
   });
 
   it('previews markdown paragraphs, nested headings, lists, and empty pages', async () => {

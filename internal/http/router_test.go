@@ -117,6 +117,72 @@ func TestRouterReturnsDefaultBoard(t *testing.T) {
 	}
 }
 
+func TestRouterListsCreatesLoadsBoardsAndColumns(t *testing.T) {
+	board := testBoard()
+	board.Columns = append(board.Columns, db.BoardColumn{ID: "column-done", Title: "Done", Position: 2})
+	renamed := board
+	renamed.Columns[0].Title = "Backlog"
+	store := fakeBoardStore{
+		board: board,
+		boards: []db.BoardSummary{
+			{ID: "board-1", WorkspaceID: "workspace-1", Name: "Platform Board", Slug: "platform", ColumnCount: 3, CardCount: 1},
+		},
+		workspaces: []db.Workspace{{ID: "workspace-1", Name: "Platform Engineering", Slug: "platform-engineering"}},
+		renamed:    renamed,
+	}
+	router := NewRouter(Options{BoardStore: store})
+
+	workspaces := httptest.NewRecorder()
+	router.ServeHTTP(workspaces, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	if workspaces.Code != http.StatusOK {
+		t.Fatalf("workspaces status = %d, want %d", workspaces.Code, http.StatusOK)
+	}
+
+	list := httptest.NewRecorder()
+	router.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/boards", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", list.Code, http.StatusOK)
+	}
+	var summaries []db.BoardSummary
+	if err := json.NewDecoder(list.Body).Decode(&summaries); err != nil {
+		t.Fatalf("Decode list returned error: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].ColumnCount != 3 {
+		t.Fatalf("summaries = %#v, want one board with columns", summaries)
+	}
+
+	get := httptest.NewRecorder()
+	router.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/boards/board-1", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d", get.Code, http.StatusOK)
+	}
+
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/boards", bytes.NewBufferString(`{"name":"Release Train"}`)))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", create.Code, http.StatusCreated)
+	}
+
+	column := httptest.NewRecorder()
+	router.ServeHTTP(column, httptest.NewRequest(http.MethodPost, "/api/boards/board-1/columns", bytes.NewBufferString(`{"title":"Blocked"}`)))
+	if column.Code != http.StatusCreated {
+		t.Fatalf("create column status = %d, want %d", column.Code, http.StatusCreated)
+	}
+
+	rename := httptest.NewRecorder()
+	router.ServeHTTP(rename, httptest.NewRequest(http.MethodPatch, "/api/columns/column-planned", bytes.NewBufferString(`{"title":"Backlog"}`)))
+	if rename.Code != http.StatusOK {
+		t.Fatalf("rename column status = %d, want %d", rename.Code, http.StatusOK)
+	}
+	var renamedBoard db.Board
+	if err := json.NewDecoder(rename.Body).Decode(&renamedBoard); err != nil {
+		t.Fatalf("Decode rename returned error: %v", err)
+	}
+	if renamedBoard.Columns[0].Title != "Backlog" {
+		t.Fatalf("renamed column = %q, want Backlog", renamedBoard.Columns[0].Title)
+	}
+}
+
 func TestRouterLoginSetsSessionCookieAndReturnsUser(t *testing.T) {
 	user := testUser()
 	router := NewRouter(Options{AuthStore: &fakeAuthStore{
@@ -435,6 +501,12 @@ func TestRouterValidatesWritePayloads(t *testing.T) {
 		{name: "update card bad json", method: http.MethodPatch, path: "/api/cards/card-1", body: `{`},
 		{name: "move missing column", method: http.MethodPatch, path: "/api/cards/card-1/move", body: `{"position":0}`},
 		{name: "move bad json", method: http.MethodPatch, path: "/api/cards/card-1/move", body: `{`},
+		{name: "create board missing name", method: http.MethodPost, path: "/api/boards", body: `{}`},
+		{name: "create board bad json", method: http.MethodPost, path: "/api/boards", body: `{`},
+		{name: "create column missing title", method: http.MethodPost, path: "/api/boards/board-1/columns", body: `{}`},
+		{name: "create column bad json", method: http.MethodPost, path: "/api/boards/board-1/columns", body: `{`},
+		{name: "rename column missing title", method: http.MethodPatch, path: "/api/columns/column-1", body: `{}`},
+		{name: "rename column bad json", method: http.MethodPatch, path: "/api/columns/column-1", body: `{`},
 		{name: "comment missing body", method: http.MethodPost, path: "/api/cards/card-1/comments", body: `{}`},
 		{name: "comment bad json", method: http.MethodPost, path: "/api/cards/card-1/comments", body: `{`},
 		{name: "create wiki missing title", method: http.MethodPost, path: "/api/wiki", body: `{"bodyMarkdown":"Body"}`},
@@ -516,6 +588,37 @@ func TestRouterLogsRequests(t *testing.T) {
 	if !strings.Contains(log.String(), `"msg":"request"`) {
 		t.Fatalf("log = %q, want request entry", log.String())
 	}
+	if !strings.Contains(log.String(), `"status":200`) {
+		t.Fatalf("log = %q, want response status", log.String())
+	}
+}
+
+func TestRouterLogsUnexpectedStoreFailures(t *testing.T) {
+	var log bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&log, nil))
+	router := NewRouter(Options{
+		Logger:     logger,
+		BoardStore: fakeBoardStore{err: errors.New("constraint failed: UNIQUE constraint failed: columns.board_id, columns.position")},
+	})
+
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/boards/default", nil))
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+	logText := log.String()
+	for _, want := range []string{
+		`"msg":"request failed"`,
+		`"component":"board_store"`,
+		`"status":500`,
+		`"code":"internal_error"`,
+		`"error":"constraint failed: UNIQUE constraint failed: columns.board_id, columns.position"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log = %q, want %s", logText, want)
+		}
+	}
 }
 
 func TestRouterValidatesCreateCardPayload(t *testing.T) {
@@ -530,12 +633,15 @@ func TestRouterValidatesCreateCardPayload(t *testing.T) {
 }
 
 type fakeBoardStore struct {
-	board     db.Board
-	card      db.BoardCard
-	detail    db.CardDetail
-	wikiPage  db.WikiPage
-	wikiPages []db.WikiPage
-	err       error
+	board      db.Board
+	renamed    db.Board
+	card       db.BoardCard
+	detail     db.CardDetail
+	wikiPage   db.WikiPage
+	wikiPages  []db.WikiPage
+	workspaces []db.Workspace
+	boards     []db.BoardSummary
+	err        error
 }
 
 type fakeAuthStore struct {
@@ -572,6 +678,51 @@ func (store *fakeAuthStore) Logout(_ context.Context, token string) error {
 func (store fakeBoardStore) GetDefaultBoard(context.Context) (db.Board, error) {
 	if store.err != nil {
 		return db.Board{}, store.err
+	}
+	return store.board, nil
+}
+
+func (store fakeBoardStore) ListWorkspaces(context.Context) ([]db.Workspace, error) {
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.workspaces, nil
+}
+
+func (store fakeBoardStore) ListBoards(context.Context) ([]db.BoardSummary, error) {
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.boards, nil
+}
+
+func (store fakeBoardStore) GetBoard(_ context.Context, _ string) (db.Board, error) {
+	if store.err != nil {
+		return db.Board{}, store.err
+	}
+	return store.board, nil
+}
+
+func (store fakeBoardStore) CreateBoard(_ context.Context, _ db.CreateBoardParams) (db.Board, error) {
+	if store.err != nil {
+		return db.Board{}, store.err
+	}
+	return store.board, nil
+}
+
+func (store fakeBoardStore) CreateColumn(_ context.Context, _ db.CreateColumnParams) (db.Board, error) {
+	if store.err != nil {
+		return db.Board{}, store.err
+	}
+	return store.board, nil
+}
+
+func (store fakeBoardStore) UpdateColumn(_ context.Context, _ db.UpdateColumnParams) (db.Board, error) {
+	if store.err != nil {
+		return db.Board{}, store.err
+	}
+	if store.renamed.ID != "" {
+		return store.renamed, nil
 	}
 	return store.board, nil
 }

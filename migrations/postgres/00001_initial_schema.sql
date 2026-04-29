@@ -34,11 +34,12 @@ CREATE TABLE workspaces (
 );
 
 CREATE TABLE workspace_members (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role text NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (workspace_id, user_id)
+    UNIQUE (workspace_id, user_id)
 );
 
 CREATE TABLE boards (
@@ -55,17 +56,19 @@ CREATE TABLE boards (
 CREATE INDEX boards_workspace_id_idx ON boards(workspace_id);
 
 CREATE TABLE board_members (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     board_id uuid NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role text NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (board_id, user_id)
+    UNIQUE (board_id, user_id)
 );
 
 CREATE TABLE columns (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     board_id uuid NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
     name text NOT NULL,
+    system_key text,
     position integer NOT NULL,
     wip_limit integer CHECK (wip_limit IS NULL OR wip_limit > 0),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -74,6 +77,7 @@ CREATE TABLE columns (
 );
 
 CREATE INDEX columns_board_id_idx ON columns(board_id);
+CREATE UNIQUE INDEX columns_board_system_key_unique ON columns(board_id, system_key) WHERE system_key IS NOT NULL;
 
 CREATE TABLE cards (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -85,6 +89,8 @@ CREATE TABLE cards (
     priority text NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
     position integer NOT NULL,
     due_at timestamptz,
+    owner_initials text NOT NULL DEFAULT '',
+    due_label text NOT NULL DEFAULT '',
     created_by uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()

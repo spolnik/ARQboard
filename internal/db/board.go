@@ -19,6 +19,21 @@ type Board struct {
 	WikiPages []WikiPage    `json:"wikiPages"`
 }
 
+type Workspace struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+type BoardSummary struct {
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspaceId"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	ColumnCount int    `json:"columnCount"`
+	CardCount   int    `json:"cardCount"`
+}
+
 type BoardColumn struct {
 	ID       string      `json:"id"`
 	Title    string      `json:"title"`
@@ -86,6 +101,20 @@ type MoveCardParams struct {
 	Position int
 }
 
+type CreateBoardParams struct {
+	Name string
+}
+
+type CreateColumnParams struct {
+	BoardID string
+	Title   string
+}
+
+type UpdateColumnParams struct {
+	ColumnID string
+	Title    string
+}
+
 type CreateCardCommentParams struct {
 	CardID string
 	Body   string
@@ -113,12 +142,13 @@ type sqlQueryer interface {
 }
 
 type seedColumn struct {
+	key      string
 	title    string
 	position int
 }
 
 type seedCard struct {
-	columnTitle string
+	columnKey   string
 	title       string
 	description string
 	owner       string
@@ -134,15 +164,15 @@ type seedWikiPage struct {
 }
 
 var defaultColumns = []seedColumn{
-	{title: "Planned", position: 0},
-	{title: "In progress", position: 1},
-	{title: "Ready for review", position: 2},
-	{title: "Done", position: 3},
+	{key: "planned", title: "Planned", position: 0},
+	{key: "in_progress", title: "In progress", position: 1},
+	{key: "ready_for_review", title: "Ready for review", position: 2},
+	{key: "done", title: "Done", position: 3},
 }
 
 var defaultCards = []seedCard{
 	{
-		columnTitle: "Planned",
+		columnKey:   "planned",
 		title:       "Wire auth session cookie flow",
 		description: "Map the session cookie lifecycle, expiry behavior, and local fallback for the first auth pass.",
 		owner:       "MS",
@@ -151,7 +181,7 @@ var defaultCards = []seedCard{
 		position:    0,
 	},
 	{
-		columnTitle: "Planned",
+		columnKey:   "planned",
 		title:       "Draft workspace migration fixtures",
 		description: "Keep migration examples tiny and readable so the test database can be recreated quickly.",
 		owner:       "JR",
@@ -160,7 +190,7 @@ var defaultCards = []seedCard{
 		position:    1,
 	},
 	{
-		columnTitle: "In progress",
+		columnKey:   "in_progress",
 		title:       "Ready for review API shape",
 		description: "Lock the first JSON contracts for boards, columns, cards, and move operations before wiring the UI.",
 		owner:       "AK",
@@ -169,7 +199,7 @@ var defaultCards = []seedCard{
 		position:    0,
 	},
 	{
-		columnTitle: "Ready for review",
+		columnKey:   "ready_for_review",
 		title:       "Deployment checklist",
 		description: "Document the minimum local and container checks before a branch is pushed for review.",
 		owner:       "JL",
@@ -198,6 +228,282 @@ func (store BoardStore) GetDefaultBoard(ctx context.Context) (Board, error) {
 	defer tx.Rollback()
 
 	boardID, err := ensureDefaultBoard(ctx, tx, driver)
+	if err != nil {
+		return Board{}, err
+	}
+
+	board, err := loadBoard(ctx, tx, driver, boardID)
+	if err != nil {
+		return Board{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Board{}, err
+	}
+
+	return board, nil
+}
+
+func (store BoardStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := ensureDefaultBoard(ctx, tx, driver); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s, name, slug
+		FROM workspaces
+		ORDER BY name, id
+	`, idText(driver, "id")))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workspaces := make([]Workspace, 0)
+	for rows.Next() {
+		var workspace Workspace
+		if err := rows.Scan(&workspace.ID, &workspace.Name, &workspace.Slug); err != nil {
+			return nil, err
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return workspaces, nil
+}
+
+func (store BoardStore) ListBoards(ctx context.Context) ([]BoardSummary, error) {
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := ensureDefaultBoard(ctx, tx, driver); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s,
+			%s,
+			boards.name,
+			boards.slug,
+			COUNT(DISTINCT columns.id) AS column_count,
+			COUNT(DISTINCT cards.id) AS card_count
+		FROM boards
+		LEFT JOIN columns ON columns.board_id = boards.id
+		LEFT JOIN cards ON cards.board_id = boards.id
+		GROUP BY boards.id, boards.workspace_id, boards.name, boards.slug, boards.created_at
+		ORDER BY boards.name, boards.created_at, boards.id
+	`,
+		idText(driver, "boards.id"),
+		idText(driver, "boards.workspace_id"),
+	))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	boards := make([]BoardSummary, 0)
+	for rows.Next() {
+		var board BoardSummary
+		if err := rows.Scan(&board.ID, &board.WorkspaceID, &board.Name, &board.Slug, &board.ColumnCount, &board.CardCount); err != nil {
+			return nil, err
+		}
+		boards = append(boards, board)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return boards, nil
+}
+
+func (store BoardStore) GetBoard(ctx context.Context, boardID string) (Board, error) {
+	boardID = strings.TrimSpace(boardID)
+	if boardID == "" {
+		return Board{}, fmt.Errorf("%w: boardId is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return Board{}, err
+	}
+
+	return loadBoard(ctx, sqlDB, driver, boardID)
+}
+
+func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParams) (Board, error) {
+	name := strings.TrimSpace(params.Name)
+	if name == "" {
+		return Board{}, fmt.Errorf("%w: name is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return Board{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return Board{}, err
+	}
+	defer tx.Rollback()
+
+	workspaceID, err := ensureWorkspace(ctx, tx, driver)
+	if err != nil {
+		return Board{}, err
+	}
+	boardID, err := newID()
+	if err != nil {
+		return Board{}, err
+	}
+	slug, err := uniqueBoardSlug(ctx, tx, driver, workspaceID, slugify(name))
+	if err != nil {
+		return Board{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO boards (id, workspace_id, name, slug, description)
+		VALUES (%s, %s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+		placeholder(driver, 5),
+	), boardID, workspaceID, name, slug, "")
+	if err != nil {
+		return Board{}, err
+	}
+
+	if _, err := ensureColumns(ctx, tx, driver, boardID); err != nil {
+		return Board{}, err
+	}
+	board, err := loadBoard(ctx, tx, driver, boardID)
+	if err != nil {
+		return Board{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Board{}, err
+	}
+
+	return board, nil
+}
+
+func (store BoardStore) CreateColumn(ctx context.Context, params CreateColumnParams) (Board, error) {
+	boardID := strings.TrimSpace(params.BoardID)
+	if boardID == "" {
+		return Board{}, fmt.Errorf("%w: boardId is required", ErrValidation)
+	}
+	title := strings.TrimSpace(params.Title)
+	if title == "" {
+		return Board{}, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return Board{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return Board{}, err
+	}
+	defer tx.Rollback()
+
+	var existingBoardID string
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT %s FROM boards WHERE id = %s", idText(driver, "id"), placeholder(driver, 1)), boardID).Scan(&existingBoardID); err != nil {
+		return Board{}, notFoundOrErr(err)
+	}
+
+	var position int
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COALESCE(MAX(position), -1) + 1 FROM columns WHERE board_id = %s", placeholder(driver, 1)), boardID).Scan(&position); err != nil {
+		return Board{}, err
+	}
+	columnID, err := newID()
+	if err != nil {
+		return Board{}, err
+	}
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO columns (id, board_id, name, position)
+		VALUES (%s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+	), columnID, boardID, title, position)
+	if err != nil {
+		return Board{}, err
+	}
+
+	board, err := loadBoard(ctx, tx, driver, boardID)
+	if err != nil {
+		return Board{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Board{}, err
+	}
+
+	return board, nil
+}
+
+func (store BoardStore) UpdateColumn(ctx context.Context, params UpdateColumnParams) (Board, error) {
+	columnID := strings.TrimSpace(params.ColumnID)
+	if columnID == "" {
+		return Board{}, fmt.Errorf("%w: columnId is required", ErrValidation)
+	}
+	title := strings.TrimSpace(params.Title)
+	if title == "" {
+		return Board{}, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+
+	sqlDB, driver, err := store.database()
+	if err != nil {
+		return Board{}, err
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return Board{}, err
+	}
+	defer tx.Rollback()
+
+	var boardID string
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT %s FROM columns WHERE id = %s", idText(driver, "board_id"), placeholder(driver, 1)), columnID).Scan(&boardID); err != nil {
+		return Board{}, notFoundOrErr(err)
+	}
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE columns
+		SET name = %s,
+			updated_at = %s
+		WHERE id = %s
+	`, placeholder(driver, 1), currentTimestamp(driver), placeholder(driver, 2)), title, columnID)
 	if err != nil {
 		return Board{}, err
 	}
@@ -782,29 +1088,65 @@ func ensureBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID s
 
 func ensureColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (map[string]string, error) {
 	columnIDs := make(map[string]string)
+	occupiedPositions := make(map[int]bool)
+	nextPosition := 0
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(
-		"SELECT id, name FROM columns WHERE board_id = %s",
+		"SELECT id, name, position, COALESCE(system_key, '') FROM columns WHERE board_id = %s",
 		placeholder(driver, 1),
 	), boardID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
+	type systemKeyBackfill struct {
+		id  string
+		key string
+	}
+	var backfills []systemKeyBackfill
 	for rows.Next() {
 		var id string
 		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var position int
+		var systemKey string
+		if err := rows.Scan(&id, &name, &position, &systemKey); err != nil {
 			return nil, err
 		}
-		columnIDs[name] = id
+		occupiedPositions[position] = true
+		if position >= nextPosition {
+			nextPosition = position + 1
+		}
+		if systemKey == "" {
+			systemKey = inferDefaultColumnKey(name, position)
+			if systemKey != "" && columnIDs[systemKey] == "" {
+				backfills = append(backfills, systemKeyBackfill{id: id, key: systemKey})
+			}
+		}
+		if systemKey != "" && columnIDs[systemKey] == "" {
+			columnIDs[systemKey] = id
+		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 
+	for _, backfill := range backfills {
+		_, err := q.ExecContext(ctx, fmt.Sprintf(
+			"UPDATE columns SET system_key = %s, updated_at = %s WHERE id = %s",
+			placeholder(driver, 1),
+			currentTimestamp(driver),
+			placeholder(driver, 2),
+		), backfill.key, backfill.id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	for _, column := range defaultColumns {
-		if _, ok := columnIDs[column.title]; ok {
+		if _, ok := columnIDs[column.key]; ok {
 			continue
 		}
 
@@ -813,26 +1155,66 @@ func ensureColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID str
 			return nil, err
 		}
 		_, err = q.ExecContext(ctx, fmt.Sprintf(
-			"INSERT INTO columns (id, board_id, name, position) VALUES (%s, %s, %s, %s)",
+			"INSERT INTO columns (id, board_id, name, system_key, position) VALUES (%s, %s, %s, %s, %s)",
 			placeholder(driver, 1),
 			placeholder(driver, 2),
 			placeholder(driver, 3),
 			placeholder(driver, 4),
-		), id, boardID, column.title, column.position)
+			placeholder(driver, 5),
+		), id, boardID, column.title, column.key, availableColumnPosition(column.position, occupiedPositions, &nextPosition))
 		if err != nil {
 			return nil, err
 		}
-		columnIDs[column.title] = id
+		columnIDs[column.key] = id
 	}
 
 	return columnIDs, nil
 }
 
+func inferDefaultColumnKey(name string, position int) string {
+	for _, column := range defaultColumns {
+		if column.position == position {
+			return column.key
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "planned", "todo":
+		return "planned"
+	case "in progress":
+		return "in_progress"
+	case "ready for review":
+		return "ready_for_review"
+	case "done":
+		return "done"
+	default:
+		return ""
+	}
+}
+
+func availableColumnPosition(preferred int, occupied map[int]bool, next *int) int {
+	if !occupied[preferred] {
+		occupied[preferred] = true
+		if preferred >= *next {
+			*next = preferred + 1
+		}
+		return preferred
+	}
+
+	for occupied[*next] {
+		*next = *next + 1
+	}
+	position := *next
+	occupied[position] = true
+	*next = position + 1
+	return position
+}
+
 func seedCards(ctx context.Context, q sqlQueryer, driver Driver, boardID string, columnIDs map[string]string) error {
 	for _, card := range defaultCards {
-		columnID := columnIDs[card.columnTitle]
+		columnID := columnIDs[card.columnKey]
 		if columnID == "" {
-			return fmt.Errorf("%w: seeded column %q not found", ErrValidation, card.columnTitle)
+			return fmt.Errorf("%w: seeded column %q not found", ErrValidation, card.columnKey)
 		}
 
 		cardID, err := newID()
@@ -1227,6 +1609,33 @@ func displayPriority(value string) string {
 	default:
 		return "Normal"
 	}
+}
+
+func uniqueBoardSlug(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, base string) (string, error) {
+	if base == "" {
+		base = "board"
+	}
+
+	for index := 0; index < 100; index++ {
+		slug := base
+		if index > 0 {
+			slug = fmt.Sprintf("%s-%d", base, index+1)
+		}
+
+		var existingID string
+		if err := q.QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT id FROM boards WHERE workspace_id = %s AND slug = %s",
+			placeholder(driver, 1),
+			placeholder(driver, 2),
+		), workspaceID, slug).Scan(&existingID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return slug, nil
+			}
+			return "", err
+		}
+	}
+
+	return "", fmt.Errorf("%w: board slug is unavailable", ErrValidation)
 }
 
 func uniqueWikiSlug(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, excludePageID string, base string) (string, error) {

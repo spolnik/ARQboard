@@ -49,6 +49,8 @@ If a test-first workflow is genuinely impractical for a small mechanical change,
 - All schema changes must be represented as committed SQL migration files.
 - Do not rely on automatic schema synchronization in production.
 - Keep migrations compatible with standard PostgreSQL and AWS RDS.
+- Every application table must have a single `id` primary key backed by a UUID value. Join tables should still have their own UUID `id` primary key and use separate unique constraints for natural pairs such as `(workspace_id, user_id)`.
+- Treat user-editable names, titles, and labels as display text only. Do not use them as durable identity. Use immutable UUID foreign keys, slugs where appropriate for URLs, or explicit internal keys for seeded/template records.
 - Supabase may be used as a hosted PostgreSQL target for demos and testing, but application code must not depend on Supabase-specific APIs.
 - Update `sqlc` queries and generated code whenever migrations or query contracts change.
 - Prefer explicit SQL over ORM abstractions.
@@ -91,11 +93,13 @@ If a test-first workflow is genuinely impractical for a small mechanical change,
 - The final app should support:
   - `arqboard serve`
   - `arqboard migrate`
+  - `arqboard mcp`
   - `arqboard admin create-user`
 - The Docker image should run without Docker Compose when provided the required environment variables.
 - `/healthz` must not require database access.
 - `/readyz` must verify database connectivity.
 - Logs should be structured and suitable for CloudWatch or similar systems.
+- The MCP server should use stdio for local trusted clients unless a remote authenticated transport is explicitly designed. MCP tools must call the same application stores and authorization boundaries as other product surfaces.
 
 ## Documentation
 
