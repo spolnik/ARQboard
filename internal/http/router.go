@@ -26,6 +26,7 @@ type Options struct {
 	Readiness  Readiness
 	BoardStore BoardStore
 	AuthStore  AuthStore
+	TeamStore  TeamStore
 	StaticFS   fs.FS
 	Logger     *slog.Logger
 }
@@ -53,6 +54,12 @@ type AuthStore interface {
 	Login(context.Context, db.LoginParams) (db.LoginSession, error)
 	CurrentUser(context.Context, string) (db.User, error)
 	Logout(context.Context, string) error
+}
+
+type TeamStore interface {
+	ListWorkspaceMembers(context.Context) ([]db.WorkspaceMember, error)
+	CreateWorkspaceMember(context.Context, db.CreateWorkspaceMemberParams) (db.WorkspaceMember, error)
+	UpdateWorkspaceMember(context.Context, db.UpdateWorkspaceMemberParams) (db.WorkspaceMember, error)
 }
 
 type errorBody struct {
@@ -106,6 +113,12 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/wiki", createWikiPage(opts.BoardStore))
 			r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore))
 			r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore))
+			r.Group(func(r chi.Router) {
+				r.Use(requireAdmin(opts.AuthStore))
+				r.Get("/members", listMembers(opts.TeamStore))
+				r.Post("/members", createMember(opts.TeamStore))
+				r.Patch("/members/{memberID}", updateMember(opts.TeamStore))
+			})
 		})
 	})
 
@@ -154,6 +167,17 @@ type createCardCommentRequest struct {
 type wikiPageRequest struct {
 	Title        string `json:"title"`
 	BodyMarkdown string `json:"bodyMarkdown"`
+}
+
+type memberRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Password    string `json:"password"`
+	Role        string `json:"role"`
+}
+
+type memberRoleRequest struct {
+	Role string `json:"role"`
 }
 
 type loginRequest struct {
@@ -248,6 +272,35 @@ func requireAuth(store AuthStore) func(http.Handler) http.Handler {
 			}
 			if _, err := store.CurrentUser(r.Context(), cookie.Value); err != nil {
 				writeAuthError(w, r, err)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func requireAdmin(store AuthStore) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if store == nil {
+				writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
+				return
+			}
+
+			cookie, err := r.Cookie(sessionCookieName)
+			if err != nil || strings.TrimSpace(cookie.Value) == "" {
+				writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+				return
+			}
+
+			user, err := store.CurrentUser(r.Context(), cookie.Value)
+			if err != nil {
+				writeAuthError(w, r, err)
+				return
+			}
+			if !user.IsAdmin {
+				writeError(w, http.StatusForbidden, "forbidden", "admin access required")
 				return
 			}
 
@@ -666,6 +719,85 @@ func updateWikiPage(store BoardStore) http.HandlerFunc {
 	}
 }
 
+func listMembers(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		members, err := store.ListWorkspaceMembers(r.Context())
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, members)
+	}
+}
+
+func createMember(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		var payload memberRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Email) == "" || strings.TrimSpace(payload.Password) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_member", "email and temporary password are required")
+			return
+		}
+
+		member, err := store.CreateWorkspaceMember(r.Context(), db.CreateWorkspaceMemberParams{
+			Email:       payload.Email,
+			DisplayName: payload.DisplayName,
+			Password:    payload.Password,
+			Role:        payload.Role,
+		})
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, member)
+	}
+}
+
+func updateMember(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		var payload memberRoleRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Role) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_member", "role is required")
+			return
+		}
+
+		member, err := store.UpdateWorkspaceMember(r.Context(), db.UpdateWorkspaceMemberParams{
+			MemberID: chi.URLParam(r, "memberID"),
+			Role:     payload.Role,
+		})
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, member)
+	}
+}
+
 func readyz(readiness Readiness) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if readiness == nil {
@@ -771,6 +903,14 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 }
 
 func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	writeDataStoreError(w, r, err, "board_store", "board store is unavailable")
+}
+
+func writeTeamStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	writeDataStoreError(w, r, err, "team_store", "team store is unavailable")
+}
+
+func writeDataStoreError(w http.ResponseWriter, r *http.Request, err error, component string, unavailableMessage string) {
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "request failed"
@@ -786,9 +926,9 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, db.ErrDatabaseUnavailable):
 		status = http.StatusServiceUnavailable
 		code = "store_unavailable"
-		message = "board store is unavailable"
+		message = unavailableMessage
 	}
-	logRequestFailure(r, "board_store", status, code, err)
+	logRequestFailure(r, component, status, code, err)
 	writeError(w, status, code, message)
 }
 

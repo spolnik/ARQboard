@@ -323,6 +323,97 @@ func TestRouterProtectsWorkspaceAPIsWhenAuthStoreIsConfigured(t *testing.T) {
 	}
 }
 
+func TestRouterManagesWorkspaceMembersForAdmins(t *testing.T) {
+	store := &fakeTeamStore{
+		members: []db.WorkspaceMember{
+			{ID: "member-1", UserID: "user-1", Email: "admin@example.com", DisplayName: "Admin", Role: "owner", IsAdmin: true},
+			{ID: "member-2", UserID: "user-2", Email: "dev@example.com", DisplayName: "Dev", Role: "member"},
+		},
+		member: db.WorkspaceMember{
+			ID:          "member-3",
+			UserID:      "user-3",
+			Email:       "qa@example.com",
+			DisplayName: "QA",
+			Role:        "viewer",
+		},
+		updated: db.WorkspaceMember{
+			ID:          "member-2",
+			UserID:      "user-2",
+			Email:       "dev@example.com",
+			DisplayName: "Dev",
+			Role:        "admin",
+		},
+	}
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: testUser()},
+		TeamStore: store,
+	})
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	listReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	list := httptest.NewRecorder()
+	router.ServeHTTP(list, listReq)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", list.Code, http.StatusOK)
+	}
+	var members []db.WorkspaceMember
+	if err := json.NewDecoder(list.Body).Decode(&members); err != nil {
+		t.Fatalf("Decode members returned error: %v", err)
+	}
+	if len(members) != 2 || members[0].Role != "owner" {
+		t.Fatalf("members = %#v, want owner and member", members)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/members", bytes.NewBufferString(`{
+		"email":"qa@example.com",
+		"displayName":"QA",
+		"password":"correct horse battery qa",
+		"role":"viewer"
+	}`))
+	createReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, createReq)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", create.Code, http.StatusCreated)
+	}
+	if store.created.Email != "qa@example.com" || store.created.Role != "viewer" {
+		t.Fatalf("created params = %#v, want qa viewer", store.created)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/members/member-2", bytes.NewBufferString(`{"role":"admin"}`))
+	updateReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	update := httptest.NewRecorder()
+	router.ServeHTTP(update, updateReq)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", update.Code, http.StatusOK)
+	}
+	if store.updatedParams.MemberID != "member-2" || store.updatedParams.Role != "admin" {
+		t.Fatalf("updated params = %#v, want member-2 admin", store.updatedParams)
+	}
+}
+
+func TestRouterRejectsWorkspaceMemberManagementForNonAdmins(t *testing.T) {
+	user := testUser()
+	user.IsAdmin = false
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: user},
+		TeamStore: &fakeTeamStore{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/members", bytes.NewBufferString(`{
+		"email":"qa@example.com",
+		"password":"correct horse battery qa",
+		"role":"viewer"
+	}`))
+	req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusForbidden)
+	}
+}
+
 func TestRouterCreatesCards(t *testing.T) {
 	store := fakeBoardStore{
 		card: db.BoardCard{
@@ -652,6 +743,15 @@ type fakeAuthStore struct {
 	loggedOutToken   string
 }
 
+type fakeTeamStore struct {
+	members       []db.WorkspaceMember
+	member        db.WorkspaceMember
+	updated       db.WorkspaceMember
+	created       db.CreateWorkspaceMemberParams
+	updatedParams db.UpdateWorkspaceMemberParams
+	err           error
+}
+
 func (store *fakeAuthStore) Login(_ context.Context, _ db.LoginParams) (db.LoginSession, error) {
 	if store.err != nil {
 		return db.LoginSession{}, store.err
@@ -673,6 +773,29 @@ func (store *fakeAuthStore) Logout(_ context.Context, token string) error {
 		return store.err
 	}
 	return nil
+}
+
+func (store *fakeTeamStore) ListWorkspaceMembers(context.Context) ([]db.WorkspaceMember, error) {
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.members, nil
+}
+
+func (store *fakeTeamStore) CreateWorkspaceMember(_ context.Context, params db.CreateWorkspaceMemberParams) (db.WorkspaceMember, error) {
+	store.created = params
+	if store.err != nil {
+		return db.WorkspaceMember{}, store.err
+	}
+	return store.member, nil
+}
+
+func (store *fakeTeamStore) UpdateWorkspaceMember(_ context.Context, params db.UpdateWorkspaceMemberParams) (db.WorkspaceMember, error) {
+	store.updatedParams = params
+	if store.err != nil {
+		return db.WorkspaceMember{}, store.err
+	}
+	return store.updated, nil
 }
 
 func (store fakeBoardStore) GetDefaultBoard(context.Context) (db.Board, error) {

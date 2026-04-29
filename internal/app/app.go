@@ -98,6 +98,7 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 		Readiness:  db.ReadinessChecker{Conn: pool},
 		BoardStore: db.BoardStore{Conn: pool},
 		AuthStore:  db.AuthStore{Conn: pool},
+		TeamStore:  db.TeamStore{Conn: pool},
 		StaticFS:   os.DirFS(cfg.WebDistDir),
 		Logger:     logger,
 	})
