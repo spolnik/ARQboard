@@ -204,11 +204,36 @@ const createdWikiPage = {
   bodyMarkdown: '# Release runbook\n\nShip carefully.',
 };
 
+const workspaceMembers = [
+  { id: 'member-1', workspaceId: 'workspace-1', userId: 'user-1', email: 'admin@example.com', displayName: 'Admin', role: 'owner', isAdmin: true },
+  { id: 'member-2', workspaceId: 'workspace-1', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'member', isAdmin: false },
+];
+
+const createdWorkspaceMember = {
+  id: 'member-3',
+  workspaceId: 'workspace-1',
+  userId: 'user-3',
+  email: 'qa@example.com',
+  displayName: 'QA',
+  role: 'viewer',
+  isAdmin: false,
+};
+
+const updatedWorkspaceMember = {
+  ...workspaceMembers[1],
+  role: 'admin',
+};
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+async function clickPrimaryNavButton(name: RegExp) {
+  const nav = await screen.findByRole('navigation', { name: /primary navigation/i });
+  fireEvent.click(within(nav).getByRole('button', { name }));
 }
 
 describe('App', () => {
@@ -280,6 +305,15 @@ describe('App', () => {
         if (url === '/api/wiki/wiki-1' && init?.method === 'PATCH') {
           return jsonResponse(updatedWikiPage);
         }
+        if (url === '/api/members') {
+          if (init?.method === 'POST') {
+            return jsonResponse(createdWorkspaceMember, 201);
+          }
+          return jsonResponse(workspaceMembers);
+        }
+        if (url === '/api/members/member-2' && init?.method === 'PATCH') {
+          return jsonResponse(updatedWorkspaceMember);
+        }
 
         throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
       }),
@@ -316,7 +350,7 @@ describe('App', () => {
 
     expect(screen.getByText(/loading workspace/i)).toBeInTheDocument();
     resolveSession(jsonResponse(userFixture));
-    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /platform board/i }, { timeout: 5000 })).toBeInTheDocument();
   });
 
   it('loads the board and wiki workspace surface from the API', async () => {
@@ -518,7 +552,7 @@ describe('App', () => {
     expect(screen.queryByRole('heading', { name: /platform board/i })).not.toBeInTheDocument();
   });
 
-  it('falls back to the first available card when the preferred default card is absent', async () => {
+  it('keeps card detail hidden until a card is selected and clears it from empty board space', async () => {
     const fallbackBoard = {
       ...boardFixture,
       columns: boardFixture.columns.map((column) => ({
@@ -549,8 +583,15 @@ describe('App', () => {
 
     render(<App />);
 
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /card detail/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /view card wire auth session cookie flow/i }));
     const detail = await screen.findByRole('complementary', { name: /card detail/i });
     expect(within(detail).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('region', { name: /kanban board/i }));
+    expect(screen.queryByRole('complementary', { name: /card detail/i })).not.toBeInTheDocument();
   });
 
   it('shows a create-card error when the board has no columns', async () => {
@@ -845,7 +886,7 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     fireEvent.click(await screen.findByRole('button', { name: /deployment checklist/i }));
     expect(await screen.findByText(/could not load the wiki page/i)).toBeInTheDocument();
 
@@ -1009,21 +1050,127 @@ describe('App', () => {
   it('switches between board, wiki, and settings views', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     expect(screen.getByRole('heading', { name: /wiki pages/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /platform board/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /settings/i }));
+    await clickPrimaryNavButton(/settings/i);
     expect(screen.getByRole('heading', { name: /workspace settings/i })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /boards/i }));
+    await clickPrimaryNavButton(/boards/i);
     expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('expands the kanban board and collapses the left navigation', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /view card wire auth session cookie flow/i }));
+    expect(await screen.findByRole('complementary', { name: /card detail/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /expand kanban board/i }));
+    expect(screen.getByRole('button', { name: /exit full screen board/i })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /card detail/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /wiki pages/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /exit full screen board/i }));
+    expect(screen.getByRole('button', { name: /expand kanban board/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /collapse navigation/i }));
+    expect(screen.getByRole('button', { name: /expand navigation/i })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: /primary navigation/i })).toHaveAttribute('data-collapsed', 'true');
+  });
+
+  it('collapses the right wiki rail and reopens it when a card is selected', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: /wiki pages/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /collapse wiki and detail panel/i }));
+    expect(screen.getByRole('button', { name: /expand wiki and detail panel/i })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /wiki pages/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /view card wire auth session cookie flow/i }));
+    expect(await screen.findByRole('complementary', { name: /card detail/i })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: /wiki pages/i })).toBeInTheDocument();
+  });
+
+  it('opens a dedicated card detail page from the right panel', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /view card wire auth session cookie flow/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open card page/i }));
+
+    const page = screen.getByRole('region', { name: /card detail page/i });
+    expect(within(page).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
+    expect(within(page).getByText(/map the session cookie lifecycle/i)).toBeInTheDocument();
+    expect(within(page).getByText(/Owner MS/i)).toBeInTheDocument();
+    expect(within(page).getByText(/Activity/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /back to board/i }));
+    expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('manages workspace members and roles from settings', async () => {
+    render(<App />);
+
+    await clickPrimaryNavButton(/settings/i);
+
+    expect(await screen.findByText('admin@example.com')).toBeInTheDocument();
+    expect(screen.getByText('dev@example.com')).toBeInTheDocument();
+    expect(screen.getAllByText('Owner').length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText(/member email/i), {
+      target: { value: 'qa@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText(/display name/i), {
+      target: { value: 'QA' },
+    });
+    fireEvent.change(screen.getByLabelText(/temporary password/i), {
+      target: { value: 'correct horse battery qa' },
+    });
+    fireEvent.change(screen.getByLabelText(/new member role/i), {
+      target: { value: 'viewer' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /add member/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/members',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            email: 'qa@example.com',
+            displayName: 'QA',
+            password: 'correct horse battery qa',
+            role: 'viewer',
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByText('qa@example.com')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/role for dev@example.com/i), {
+      target: { value: 'admin' },
+    });
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/members/member-2',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ role: 'admin' }),
+        }),
+      ),
+    );
+    expect(screen.getByText(/role updated/i)).toBeInTheDocument();
   });
 
   it('edits markdown wiki pages with preview', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     fireEvent.click(await screen.findByRole('button', { name: /deployment checklist/i }));
     expect(await screen.findByRole('heading', { name: /deploy/i })).toBeInTheDocument();
 
@@ -1050,7 +1197,7 @@ describe('App', () => {
   it('creates markdown wiki pages', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
     fireEvent.change(screen.getByLabelText(/wiki title/i), {
       target: { value: 'Release runbook' },
@@ -1078,7 +1225,7 @@ describe('App', () => {
   it('renders wiki pages as a tree and opens nested pages', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
 
     const tree = screen.getByRole('navigation', { name: /wiki page tree/i });
     expect(within(tree).getByText('Engineering')).toBeInTheDocument();
@@ -1093,7 +1240,7 @@ describe('App', () => {
   it('renders rich markdown safely in the wiki preview', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
     fireEvent.change(screen.getByLabelText(/markdown body/i), {
       target: {
@@ -1117,7 +1264,7 @@ describe('App', () => {
   it('previews markdown paragraphs, nested headings, lists, and empty pages', async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /wiki/i }));
+    await clickPrimaryNavButton(/wiki/i);
     fireEvent.click(screen.getByRole('button', { name: /new wiki page/i }));
 
     expect(screen.getByText(/no content yet/i)).toBeInTheDocument();

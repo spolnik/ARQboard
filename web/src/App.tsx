@@ -11,18 +11,26 @@ import type { DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
+  ArrowLeft,
   Bell,
   BookOpen,
   CalendarDays,
   CheckCircle2,
   CircleAlert,
   CircleDot,
+  ExternalLink,
   FilePlus2,
   Folder,
   LayoutDashboard,
   LogIn,
   LogOut,
+  Maximize2,
   MessageSquare,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Plus,
   Save,
@@ -35,9 +43,9 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import type { FormEvent, MouseEvent, ReactNode } from 'react';
 
-type View = 'boards' | 'wiki' | 'settings';
+type View = 'boards' | 'wiki' | 'settings' | 'card';
 
 type AuthState = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -47,6 +55,18 @@ type CurrentUser = {
   id: string;
   email: string;
   displayName: string;
+  isAdmin: boolean;
+};
+
+type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
+
+type WorkspaceMember = {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  role: WorkspaceRole;
   isAdmin: boolean;
 };
 
@@ -126,12 +146,21 @@ type WikiForm = {
   bodyMarkdown: string;
 };
 
+type MemberForm = {
+  email: string;
+  displayName: string;
+  password: string;
+  role: WorkspaceRole;
+};
+
 type WikiTreeNode = {
   key: string;
   label: string;
   page: WikiPage | null;
   children: WikiTreeNode[];
 };
+
+const workspaceRoleOptions: WorkspaceRole[] = ['owner', 'admin', 'member', 'viewer'];
 
 function App() {
   const [authState, setAuthState] = useState<AuthState>('loading');
@@ -140,6 +169,9 @@ function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [activeView, setActiveView] = useState<View>('boards');
+  const [isNavCollapsed, setIsNavCollapsed] = useState(false);
+  const [isBoardFullScreen, setIsBoardFullScreen] = useState(false);
+  const [isRightRailCollapsed, setIsRightRailCollapsed] = useState(false);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState('');
   const [board, setBoard] = useState<Board | null>(null);
@@ -166,6 +198,15 @@ function App() {
   const [selectedWikiPage, setSelectedWikiPage] = useState<WikiPage | null>(null);
   const [isCreatingWikiPage, setIsCreatingWikiPage] = useState(false);
   const [wikiForm, setWikiForm] = useState<WikiForm>({ title: '', bodyMarkdown: '' });
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
+  const [memberForm, setMemberForm] = useState<MemberForm>({
+    email: '',
+    displayName: '',
+    password: '',
+    role: 'member',
+  });
+  const [memberMessage, setMemberMessage] = useState('');
+  const [isSavingMember, setIsSavingMember] = useState(false);
   const [newComment, setNewComment] = useState('');
   const [error, setError] = useState('');
 
@@ -176,6 +217,8 @@ function App() {
     setSelectedCardId('');
     setCardDetail(null);
     setIsEditingCard(false);
+    setIsBoardFullScreen(false);
+    setIsRightRailCollapsed(false);
     setIsCreateOpen(false);
     setIsCreateBoardOpen(false);
     setNewBoardName('');
@@ -185,6 +228,10 @@ function App() {
     setColumnTitle('');
     setSelectedWikiPage(null);
     setIsCreatingWikiPage(false);
+    setWorkspaceMembers([]);
+    setMemberForm({ email: '', displayName: '', password: '', role: 'member' });
+    setMemberMessage('');
+    setIsSavingMember(false);
     setNewComment('');
     setError('');
   }, []);
@@ -308,7 +355,7 @@ function App() {
         const nextBoard = normalizeBoard(await response.json());
         if (!cancelled) {
           setBoard(nextBoard);
-          setSelectedCardId(defaultSelectedCardId(nextBoard));
+          setSelectedCardId('');
           setCardDetail(null);
           setIsEditingCard(false);
           setSelectedWikiPage(null);
@@ -360,10 +407,45 @@ function App() {
     };
   }, [authState, selectedCardId]);
 
+  useEffect(() => {
+    if (authState !== 'authenticated' || activeView !== 'settings' || !currentUser?.isAdmin) {
+      return;
+    }
+
+    let cancelled = false;
+    async function loadWorkspaceMembers() {
+      try {
+        const members = await getJSON<WorkspaceMember[]>('/api/members');
+        if (!cancelled) {
+          setWorkspaceMembers(sortWorkspaceMembers(members));
+          setMemberMessage('');
+        }
+      } catch {
+        if (!cancelled) {
+          setMemberMessage('Could not load team members.');
+        }
+      }
+    }
+
+    loadWorkspaceMembers();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, authState, currentUser?.isAdmin]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
-  const boardSelectedCard = allCards.find((card) => card.id === selectedCardId) ?? allCards[0];
-  const selectedCard = cardDetail?.card.id === selectedCardId ? cardDetail.card : boardSelectedCard;
+  const boardSelectedCard = selectedCardId ? allCards.find((card) => card.id === selectedCardId) : undefined;
+  const selectedCard = selectedCardId && cardDetail?.card.id === selectedCardId ? cardDetail.card : boardSelectedCard;
+  const boardFullScreen = activeView === 'boards' && isBoardFullScreen;
+  const rightRailVisible = activeView === 'boards' && !boardFullScreen && !isRightRailCollapsed;
+  const layoutGridColumns = rightRailVisible
+    ? isNavCollapsed
+      ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)_20rem]'
+      : 'lg:grid-cols-[14rem_minmax(0,1fr)_20rem]'
+    : isNavCollapsed
+      ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)]'
+      : 'lg:grid-cols-[14rem_minmax(0,1fr)]';
 
   const filteredColumns = useMemo(() => {
     if (!board) {
@@ -457,13 +539,13 @@ function App() {
       setBoards((current) => upsertBoardSummary(current, nextBoard));
       setSelectedBoardId(nextBoard.id);
       setBoard(nextBoard);
-      setSelectedCardId(defaultSelectedCardId(nextBoard));
+      setSelectedCardId('');
       setCardDetail(null);
       setSelectedWikiPage(null);
       setIsCreatingWikiPage(false);
       setNewBoardName('');
       setIsCreateBoardOpen(false);
-      setActiveView('boards');
+      showView('boards');
       setError('');
     } catch {
       setError('Could not create the board.');
@@ -566,10 +648,11 @@ function App() {
         setBoards((current) => upsertBoardSummary(current, nextBoard));
       }
       setSelectedCardId(card.id);
+      setIsRightRailCollapsed(false);
       setNewCardTitle('');
       setNewCardOwner('');
       setIsCreateOpen(false);
-      setActiveView('boards');
+      showView('boards');
       setError('');
     } catch {
       setError('Could not create the card.');
@@ -583,7 +666,7 @@ function App() {
         body: JSON.stringify({ columnId, position }),
       });
       setBoard(normalizeBoard(nextBoard));
-      setSelectedCardId(cardId);
+      selectCard(cardId);
       setError('');
     } catch {
       setError('Could not move the card.');
@@ -674,7 +757,7 @@ function App() {
       setSelectedWikiPage(page);
       setWikiForm(formFromWikiPage(page));
       setIsCreatingWikiPage(false);
-      setActiveView('wiki');
+      showView('wiki');
       setError('');
     } catch {
       setError('Could not load the wiki page.');
@@ -685,7 +768,7 @@ function App() {
     setSelectedWikiPage(null);
     setWikiForm({ title: '', bodyMarkdown: '' });
     setIsCreatingWikiPage(true);
-    setActiveView('wiki');
+    showView('wiki');
   }
 
   async function submitWikiPage(event: FormEvent<HTMLFormElement>) {
@@ -714,6 +797,49 @@ function App() {
     }
   }
 
+  async function submitWorkspaceMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const payload = {
+      email: memberForm.email.trim(),
+      displayName: memberForm.displayName.trim(),
+      password: memberForm.password,
+      role: memberForm.role,
+    };
+    if (!payload.email || !payload.password.trim()) {
+      setMemberMessage('Email and temporary password are required.');
+      return;
+    }
+
+    setIsSavingMember(true);
+    try {
+      const member = await requestJSON<WorkspaceMember>('/api/members', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setWorkspaceMembers((current) => sortWorkspaceMembers(upsertWorkspaceMember(current, member)));
+      setMemberForm({ email: '', displayName: '', password: '', role: 'member' });
+      setMemberMessage('Member added.');
+    } catch {
+      setMemberMessage('Could not add the member.');
+    } finally {
+      setIsSavingMember(false);
+    }
+  }
+
+  async function updateWorkspaceMemberRole(memberID: string, role: WorkspaceRole) {
+    try {
+      const member = await requestJSON<WorkspaceMember>(`/api/members/${memberID}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      });
+      setWorkspaceMembers((current) => sortWorkspaceMembers(upsertWorkspaceMember(current, member)));
+      setMemberMessage('Role updated.');
+    } catch {
+      setMemberMessage('Could not update the role.');
+    }
+  }
+
   async function handleDragEnd(event: DragEndEvent) {
     if (!board || !event.over) {
       return;
@@ -730,6 +856,38 @@ function App() {
     }
 
     await moveCard(activeCard.id, target.columnId, target.position);
+  }
+
+  function clearCardSelectionFromBoard(event: MouseEvent<HTMLElement>) {
+    const target = event.target as HTMLElement;
+    if (target.closest('[data-card-interaction="true"], button, input, textarea, select, a')) {
+      return;
+    }
+    setSelectedCardId('');
+    setCardDetail(null);
+    setIsEditingCard(false);
+  }
+
+  function selectCard(cardId: string) {
+    setSelectedCardId(cardId);
+    setIsRightRailCollapsed(false);
+    setIsBoardFullScreen(false);
+    setActiveView('boards');
+  }
+
+  function openSelectedCardPage() {
+    if (!selectedCard) {
+      return;
+    }
+    setIsBoardFullScreen(false);
+    setActiveView('card');
+  }
+
+  function showView(view: View) {
+    setActiveView(view);
+    if (view !== 'boards') {
+      setIsBoardFullScreen(false);
+    }
   }
 
   if (authState === 'loading') {
@@ -751,7 +909,8 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
-      <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4">
+      {!boardFullScreen ? (
+        <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-950 text-sm font-semibold text-white">
             A
@@ -811,35 +970,61 @@ function App() {
             Sign out
           </button>
         </div>
-      </header>
+        </header>
+      ) : null}
 
-      <div className="grid min-h-[calc(100vh-3.5rem)] grid-cols-1 lg:grid-cols-[14rem_minmax(0,1fr)_20rem]">
+      <div
+        className={
+          boardFullScreen
+            ? 'min-h-screen bg-slate-50'
+            : `grid min-h-[calc(100vh-3.5rem)] grid-cols-1 ${layoutGridColumns}`
+        }
+      >
+        {!boardFullScreen ? (
         <aside className="border-b border-slate-200 bg-white p-3 lg:border-b-0 lg:border-r">
-          <nav className="flex gap-2 lg:flex-col">
+          <nav
+            className={`flex gap-2 lg:flex-col ${isNavCollapsed ? 'lg:items-center' : ''}`}
+            aria-label="Primary navigation"
+            data-collapsed={isNavCollapsed ? 'true' : 'false'}
+          >
+            <button
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
+              type="button"
+              aria-label={isNavCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+              aria-expanded={!isNavCollapsed}
+              onClick={() => setIsNavCollapsed((current) => !current)}
+              title={isNavCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+            >
+              {isNavCollapsed ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" /> : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
+            </button>
             <NavButton
               active={activeView === 'boards'}
               icon={<LayoutDashboard className="h-4 w-4" aria-hidden="true" />}
               label="Boards"
-              onClick={() => setActiveView('boards')}
+              collapsed={isNavCollapsed}
+              onClick={() => showView('boards')}
             />
             <NavButton
               active={activeView === 'wiki'}
               icon={<BookOpen className="h-4 w-4" aria-hidden="true" />}
               label="Wiki"
-              onClick={() => setActiveView('wiki')}
+              collapsed={isNavCollapsed}
+              onClick={() => showView('wiki')}
             />
             <NavButton
               active={activeView === 'settings'}
               icon={<Settings className="h-4 w-4" aria-hidden="true" />}
               label="Settings"
-              onClick={() => setActiveView('settings')}
+              collapsed={isNavCollapsed}
+              onClick={() => showView('settings')}
             />
           </nav>
         </aside>
+        ) : null}
 
         {activeView === 'boards' ? (
           <>
-            <main className="min-w-0 p-4">
+            <main className={boardFullScreen ? 'min-w-0 p-4' : 'min-w-0 p-4'}>
               <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Platform Engineering</p>
@@ -877,6 +1062,28 @@ function App() {
                     <Plus className="h-4 w-4" aria-hidden="true" />
                     Add Column
                   </button>
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    type="button"
+                    aria-label={isRightRailCollapsed ? 'Expand wiki and detail panel' : 'Collapse wiki and detail panel'}
+                    aria-expanded={!isRightRailCollapsed}
+                    onClick={() => setIsRightRailCollapsed((current) => !current)}
+                    disabled={boardFullScreen}
+                    title={isRightRailCollapsed ? 'Expand wiki and detail panel' : 'Collapse wiki and detail panel'}
+                  >
+                    {isRightRailCollapsed ? <PanelRightOpen className="h-4 w-4" aria-hidden="true" /> : <PanelRightClose className="h-4 w-4" aria-hidden="true" />}
+                    {isRightRailCollapsed ? 'Show panel' : 'Hide panel'}
+                  </button>
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    type="button"
+                    aria-label={boardFullScreen ? 'Exit full screen board' : 'Expand kanban board'}
+                    aria-pressed={boardFullScreen}
+                    onClick={() => setIsBoardFullScreen((current) => !current)}
+                  >
+                    {boardFullScreen ? <Minimize2 className="h-4 w-4" aria-hidden="true" /> : <Maximize2 className="h-4 w-4" aria-hidden="true" />}
+                    {boardFullScreen ? 'Exit full screen' : 'Expand'}
+                  </button>
                   <div className="hidden h-9 items-center gap-2 text-sm text-slate-600 md:flex">
                     <CalendarDays className="h-4 w-4 text-slate-400" aria-hidden="true" />
                     Sprint window Apr 28 - May 12
@@ -894,18 +1101,19 @@ function App() {
                 </p>
               ) : (
                 <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
-                  <div className="overflow-x-auto pb-2">
+                  <div className={boardFullScreen ? 'h-[calc(100vh-7.5rem)] overflow-auto pb-2' : 'overflow-x-auto pb-2'}>
                     <section
-                      className="grid min-w-[64rem] gap-3"
+                      className={`grid gap-3 ${boardFullScreen ? 'min-h-full min-w-[72rem]' : 'min-w-[64rem]'}`}
                       style={{ gridTemplateColumns: `repeat(${Math.max(filteredColumns.length, 1)}, minmax(15rem, 1fr))` }}
                       aria-label="Kanban board"
+                      onClick={clearCardSelectionFromBoard}
                     >
                       {filteredColumns.map((column) => (
                         <KanbanColumn
                           key={column.id}
                           column={column}
                           selectedCardId={selectedCard?.id ?? ''}
-                          onSelectCard={setSelectedCardId}
+                          onSelectCard={selectCard}
                           onRenameColumn={startRenamingColumn}
                         />
                       ))}
@@ -915,12 +1123,22 @@ function App() {
               )}
             </main>
 
+            {rightRailVisible ? (
             <div className="border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0">
               {selectedCard ? (
                 <aside className="mb-5" aria-label="Card detail">
                   <div className="mb-2 flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Card detail</h2>
                     <div className="flex items-center gap-1">
+                      <button
+                        className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        type="button"
+                        aria-label="Open card page"
+                        onClick={openSelectedCardPage}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                        Open
+                      </button>
                       <button
                         className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
                         type="button"
@@ -1101,13 +1319,80 @@ function App() {
                 <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
               </aside>
             </div>
+            ) : null}
           </>
         ) : (
-          <main className="min-w-0 p-4 lg:col-span-2">
+          <main className="min-w-0 p-4">
             {error ? (
               <p className="mb-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
             ) : null}
-            {activeView === 'wiki' ? (
+            {activeView === 'card' ? (
+              <section className="max-w-5xl" aria-label="Card detail page">
+                <button
+                  className="mb-4 inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  type="button"
+                  onClick={() => showView('boards')}
+                >
+                  <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                  Back to board
+                </button>
+
+                {selectedCard ? (
+                  <div className="space-y-4">
+                    <div className="rounded-md border border-slate-200 bg-white p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Card detail</p>
+                      <h1 className="mt-1 text-2xl font-semibold tracking-normal">{selectedCard.title}</h1>
+                      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">{selectedCard.description}</p>
+                      <div className="mt-4 grid gap-2 text-sm text-slate-600 sm:grid-cols-3">
+                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Owner {selectedCard.owner}</p>
+                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Priority {selectedCard.priority}</p>
+                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Due {selectedCard.due}</p>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <section className="rounded-md border border-slate-200 bg-white p-4" aria-labelledby="card-page-comments-heading">
+                        <h2 id="card-page-comments-heading" className="text-sm font-semibold">
+                          Comments
+                        </h2>
+                        <div className="mt-3 space-y-2">
+                          {cardDetail?.comments.length ? (
+                            cardDetail.comments.map((comment) => (
+                              <p key={comment.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                                {comment.body}
+                              </p>
+                            ))
+                          ) : (
+                            <p className="text-sm text-slate-500">No comments yet</p>
+                          )}
+                        </div>
+                      </section>
+
+                      <section className="rounded-md border border-slate-200 bg-white p-4" aria-labelledby="card-page-activity-heading">
+                        <h2 id="card-page-activity-heading" className="text-sm font-semibold">
+                          Activity
+                        </h2>
+                        <div className="mt-3 space-y-1">
+                          {cardDetail?.activity.length ? (
+                            cardDetail.activity.map((event) => (
+                              <p key={event.id} className="text-sm text-slate-600">
+                                <span className="font-medium text-slate-800">{event.eventType}</span> {event.summary}
+                              </p>
+                            ))
+                          ) : (
+                            <p className="text-sm text-slate-500">No activity yet</p>
+                          )}
+                        </div>
+                      </section>
+                    </div>
+                  </div>
+                ) : (
+                  <article className="rounded-md border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                    Select a card from the board to open its full detail page.
+                  </article>
+                )}
+              </section>
+            ) : activeView === 'wiki' ? (
               <section className="max-w-5xl">
                 <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                   <div>
@@ -1179,17 +1464,155 @@ function App() {
                 </div>
               </section>
             ) : (
-              <section className="max-w-4xl">
+              <section className="max-w-6xl">
                 <div className="mb-4">
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Administration</p>
                   <h1 className="text-2xl font-semibold tracking-normal">Workspace Settings</h1>
                 </div>
-                <div className="rounded-md border border-slate-200 bg-white p-4">
-                  <h2 className="text-sm font-semibold">Local workspace</h2>
-                  <p className="mt-2 text-sm leading-6 text-slate-600">
-                    Board cards now persist in the configured database. Local development uses SQLite unless
-                    `DATABASE_URL` points at PostgreSQL.
-                  </p>
+                <div className="space-y-4">
+                  <div className="rounded-md border border-slate-200 bg-white p-4">
+                    <h2 className="text-sm font-semibold">Local workspace</h2>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">
+                      Board cards now persist in the configured database. Local development uses SQLite unless
+                      `DATABASE_URL` points at PostgreSQL.
+                    </p>
+                  </div>
+
+                  <div className="rounded-md border border-slate-200 bg-white p-4">
+                    <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h2 className="text-sm font-semibold">Team members</h2>
+                        <p className="text-sm text-slate-500">Manage workspace access and role assignments.</p>
+                      </div>
+                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{workspaceMembers.length} members</p>
+                    </div>
+
+                    {currentUser?.isAdmin ? (
+                      <>
+                        {memberMessage ? (
+                          <p className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{memberMessage}</p>
+                        ) : null}
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[42rem] border-collapse text-left text-sm">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">
+                                <th className="py-2 pr-3">Member</th>
+                                <th className="py-2 pr-3">Current role</th>
+                                <th className="py-2">Change role</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {workspaceMembers.length ? (
+                                workspaceMembers.map((member) => (
+                                  <tr key={member.id} className="border-b border-slate-100 last:border-b-0">
+                                    <td className="py-3 pr-3">
+                                      <p className="font-medium text-slate-900">{member.displayName || member.email}</p>
+                                      <p className="text-slate-500">{member.email}</p>
+                                    </td>
+                                    <td className="py-3 pr-3">
+                                      <span className="inline-flex rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700">
+                                        {displayWorkspaceRole(member.role)}
+                                      </span>
+                                      {member.isAdmin ? <span className="ml-2 text-xs text-slate-500">Global admin</span> : null}
+                                    </td>
+                                    <td className="py-3">
+                                      <select
+                                        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                                        aria-label={`Role for ${member.email}`}
+                                        value={member.role}
+                                        onChange={(event) => updateWorkspaceMemberRole(member.id, event.target.value as WorkspaceRole)}
+                                      >
+                                        {workspaceRoleOptions.map((role) => (
+                                          <option key={role} value={role}>
+                                            {displayWorkspaceRole(role)}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr>
+                                  <td className="py-6 text-center text-sm text-slate-500" colSpan={3}>
+                                    No members loaded yet.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <form className="mt-5 grid gap-3 border-t border-slate-200 pt-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_auto]" onSubmit={submitWorkspaceMember}>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="member-email">
+                              Member email
+                            </label>
+                            <input
+                              id="member-email"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={memberForm.email}
+                              onChange={(event) => setMemberForm((current) => ({ ...current, email: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="member-display-name">
+                              Display name
+                            </label>
+                            <input
+                              id="member-display-name"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={memberForm.displayName}
+                              onChange={(event) => setMemberForm((current) => ({ ...current, displayName: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="member-password">
+                              Temporary password
+                            </label>
+                            <input
+                              id="member-password"
+                              type="password"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={memberForm.password}
+                              onChange={(event) => setMemberForm((current) => ({ ...current, password: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="member-role">
+                              New member role
+                            </label>
+                            <select
+                              id="member-role"
+                              className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                              value={memberForm.role}
+                              onChange={(event) => setMemberForm((current) => ({ ...current, role: event.target.value as WorkspaceRole }))}
+                            >
+                              {workspaceRoleOptions.map((role) => (
+                                <option key={role} value={role}>
+                                  {displayWorkspaceRole(role)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex items-end">
+                            <button
+                              className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                              type="submit"
+                              disabled={isSavingMember}
+                            >
+                              <Plus className="h-4 w-4" aria-hidden="true" />
+                              Add member
+                            </button>
+                          </div>
+                        </form>
+                      </>
+                    ) : (
+                      <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                        Admin access is required to manage workspace members.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </section>
             )}
@@ -1565,6 +1988,7 @@ function SortableCard({
   return (
     <article
       ref={setNodeRef}
+      data-card-interaction="true"
       className={`rounded-md border bg-white shadow-sm ${selected ? 'border-slate-950 ring-1 ring-slate-950' : 'border-slate-200'} ${
         isDragging ? 'opacity-60' : ''
       }`}
@@ -1602,26 +2026,29 @@ function SortableCard({
 
 function NavButton({
   active = false,
+  collapsed = false,
   icon,
   label,
   onClick,
 }: {
   active?: boolean;
+  collapsed?: boolean;
   icon: ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium ${
+      className={`inline-flex h-9 items-center gap-2 rounded-md text-sm font-medium ${collapsed ? 'w-9 justify-center px-0' : 'px-3'} ${
         active ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'
       }`}
       type="button"
       aria-pressed={active}
+      title={collapsed ? label : undefined}
       onClick={onClick}
     >
       {icon}
-      {label}
+      <span className={collapsed ? 'sr-only' : ''}>{label}</span>
     </button>
   );
 }
@@ -1672,16 +2099,11 @@ function normalizeCardDetail(detail: CardDetail): CardDetail {
   };
 }
 
-function defaultSelectedCardId(board: Board) {
-  const cards = board.columns.flatMap((column) => column.cards);
-  return cards.find((card) => card.title === 'Ready for review API shape')?.id ?? cards[0]?.id ?? '';
-}
-
 function selectedCardIdForBoard(currentCardId: string, board: Board) {
   if (currentCardId && findCard(board, currentCardId)) {
     return currentCardId;
   }
-  return defaultSelectedCardId(board);
+  return '';
 }
 
 function upsertBoardSummary(summaries: BoardSummary[], board: Board): BoardSummary[] {
@@ -1696,6 +2118,37 @@ function upsertBoardSummary(summaries: BoardSummary[], board: Board): BoardSumma
   };
 
   return [...summaries.filter((summary) => summary.id !== board.id), nextSummary].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function upsertWorkspaceMember(members: WorkspaceMember[], member: WorkspaceMember): WorkspaceMember[] {
+  const nextMembers = members.some((candidate) => candidate.id === member.id)
+    ? members.map((candidate) => (candidate.id === member.id ? member : candidate))
+    : [...members, member];
+  return nextMembers;
+}
+
+function sortWorkspaceMembers(members: WorkspaceMember[]): WorkspaceMember[] {
+  const roleOrder: Record<WorkspaceRole, number> = {
+    owner: 0,
+    admin: 1,
+    member: 2,
+    viewer: 3,
+  };
+
+  return [...members].sort((left, right) => roleOrder[left.role] - roleOrder[right.role] || left.email.localeCompare(right.email));
+}
+
+function displayWorkspaceRole(role: WorkspaceRole) {
+  switch (role) {
+    case 'owner':
+      return 'Owner';
+    case 'admin':
+      return 'Admin';
+    case 'viewer':
+      return 'Viewer';
+    default:
+      return 'Member';
+  }
 }
 
 function addCardToBoard(board: Board | null, card: Card): Board | null {
