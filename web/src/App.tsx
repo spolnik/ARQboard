@@ -11,25 +11,29 @@ import type { DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  ArrowRight,
   Bell,
   BookOpen,
   CalendarDays,
   CheckCircle2,
+  CircleAlert,
+  CircleDot,
   FilePlus2,
-  GripVertical,
+  Folder,
   LayoutDashboard,
   LogIn,
   LogOut,
   MessageSquare,
-  MoreHorizontal,
   Pencil,
   Plus,
   Save,
   Search,
   Settings,
+  SignalHigh,
+  SignalLow,
   UserRound,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
@@ -100,6 +104,15 @@ type Board = {
   wikiPages: WikiPage[];
 };
 
+type BoardSummary = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  slug: string;
+  columnCount: number;
+  cardCount: number;
+};
+
 type CardForm = {
   title: string;
   description: string;
@@ -113,6 +126,13 @@ type WikiForm = {
   bodyMarkdown: string;
 };
 
+type WikiTreeNode = {
+  key: string;
+  label: string;
+  page: WikiPage | null;
+  children: WikiTreeNode[];
+};
+
 function App() {
   const [authState, setAuthState] = useState<AuthState>('loading');
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -120,6 +140,8 @@ function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [activeView, setActiveView] = useState<View>('boards');
+  const [boards, setBoards] = useState<BoardSummary[]>([]);
+  const [selectedBoardId, setSelectedBoardId] = useState('');
   const [board, setBoard] = useState<Board | null>(null);
   const [selectedCardId, setSelectedCardId] = useState('');
   const [cardDetail, setCardDetail] = useState<CardDetail | null>(null);
@@ -135,6 +157,12 @@ function App() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newCardTitle, setNewCardTitle] = useState('');
   const [newCardOwner, setNewCardOwner] = useState('');
+  const [isCreateBoardOpen, setIsCreateBoardOpen] = useState(false);
+  const [newBoardName, setNewBoardName] = useState('');
+  const [isCreateColumnOpen, setIsCreateColumnOpen] = useState(false);
+  const [newColumnTitle, setNewColumnTitle] = useState('');
+  const [renamingColumn, setRenamingColumn] = useState<Column | null>(null);
+  const [columnTitle, setColumnTitle] = useState('');
   const [selectedWikiPage, setSelectedWikiPage] = useState<WikiPage | null>(null);
   const [isCreatingWikiPage, setIsCreatingWikiPage] = useState(false);
   const [wikiForm, setWikiForm] = useState<WikiForm>({ title: '', bodyMarkdown: '' });
@@ -142,11 +170,19 @@ function App() {
   const [error, setError] = useState('');
 
   const resetWorkspace = useCallback(() => {
+    setBoards([]);
+    setSelectedBoardId('');
     setBoard(null);
     setSelectedCardId('');
     setCardDetail(null);
     setIsEditingCard(false);
     setIsCreateOpen(false);
+    setIsCreateBoardOpen(false);
+    setNewBoardName('');
+    setIsCreateColumnOpen(false);
+    setNewColumnTitle('');
+    setRenamingColumn(null);
+    setColumnTitle('');
     setSelectedWikiPage(null);
     setIsCreatingWikiPage(false);
     setNewComment('');
@@ -206,9 +242,58 @@ function App() {
 
     let cancelled = false;
 
+    async function loadBoards() {
+      try {
+        const response = await fetch('/api/boards');
+        if (response.status === 401) {
+          if (!cancelled) {
+            resetWorkspace();
+            setAuthState('unauthenticated');
+            setCurrentUser(null);
+          }
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load boards: ${response.status}`);
+        }
+        const nextBoards = ((await response.json()) as BoardSummary[]).sort((left, right) => left.name.localeCompare(right.name));
+        if (!cancelled) {
+          setBoards(nextBoards);
+          setSelectedBoardId((current) => {
+            if (nextBoards.some((candidate) => candidate.id === current)) {
+              return current;
+            }
+            return nextBoards[0]?.id ?? '';
+          });
+          if (nextBoards.length === 0) {
+            setBoard(null);
+            setSelectedCardId('');
+          }
+          setError('');
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Could not load boards. Check that migrations have run and the API is available.');
+        }
+      }
+    }
+
+    loadBoards();
+    return () => {
+      cancelled = true;
+    };
+  }, [authState, resetWorkspace]);
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || !selectedBoardId || board?.id === selectedBoardId) {
+      return;
+    }
+
+    let cancelled = false;
+
     async function loadBoard() {
       try {
-        const response = await fetch('/api/boards/default');
+        const response = await fetch(`/api/boards/${selectedBoardId}`);
         if (response.status === 401) {
           if (!cancelled) {
             resetWorkspace();
@@ -223,11 +308,17 @@ function App() {
         const nextBoard = normalizeBoard(await response.json());
         if (!cancelled) {
           setBoard(nextBoard);
-          setSelectedCardId((current) => current || defaultSelectedCardId(nextBoard));
+          setSelectedCardId(defaultSelectedCardId(nextBoard));
+          setCardDetail(null);
+          setIsEditingCard(false);
+          setSelectedWikiPage(null);
+          setIsCreatingWikiPage(false);
           setError('');
         }
       } catch {
         if (!cancelled) {
+          setBoard(null);
+          setSelectedCardId('');
           setError('Could not load the board. Check that migrations have run and the API is available.');
         }
       }
@@ -237,7 +328,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [authState, resetWorkspace]);
+  }, [authState, board?.id, resetWorkspace, selectedBoardId]);
 
   useEffect(() => {
     if (authState !== 'authenticated' || !selectedCardId) {
@@ -333,6 +424,115 @@ function App() {
     }
   }
 
+  function selectBoard(boardId: string) {
+    if (boardId === selectedBoardId) {
+      return;
+    }
+
+    setSelectedBoardId(boardId);
+    setBoard(null);
+    setSelectedCardId('');
+    setCardDetail(null);
+    setIsEditingCard(false);
+    setSelectedWikiPage(null);
+    setIsCreatingWikiPage(false);
+    setError('');
+  }
+
+  async function createBoard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const name = newBoardName.trim();
+    if (!name) {
+      return;
+    }
+
+    try {
+      const nextBoard = normalizeBoard(
+        await requestJSON<Board>('/api/boards', {
+          method: 'POST',
+          body: JSON.stringify({ name }),
+        }),
+      );
+      setBoards((current) => upsertBoardSummary(current, nextBoard));
+      setSelectedBoardId(nextBoard.id);
+      setBoard(nextBoard);
+      setSelectedCardId(defaultSelectedCardId(nextBoard));
+      setCardDetail(null);
+      setSelectedWikiPage(null);
+      setIsCreatingWikiPage(false);
+      setNewBoardName('');
+      setIsCreateBoardOpen(false);
+      setActiveView('boards');
+      setError('');
+    } catch {
+      setError('Could not create the board.');
+    }
+  }
+
+  async function createColumn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!board) {
+      return;
+    }
+
+    const title = newColumnTitle.trim();
+    if (!title) {
+      return;
+    }
+
+    try {
+      const nextBoard = normalizeBoard(
+        await requestJSON<Board>(`/api/boards/${board.id}/columns`, {
+          method: 'POST',
+          body: JSON.stringify({ title }),
+        }),
+      );
+      setBoard(nextBoard);
+      setBoards((current) => upsertBoardSummary(current, nextBoard));
+      setSelectedCardId((current) => selectedCardIdForBoard(current, nextBoard));
+      setNewColumnTitle('');
+      setIsCreateColumnOpen(false);
+      setError('');
+    } catch {
+      setError('Could not add the column.');
+    }
+  }
+
+  function startRenamingColumn(column: Column) {
+    setRenamingColumn(column);
+    setColumnTitle(column.title);
+  }
+
+  async function renameColumn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!renamingColumn) {
+      return;
+    }
+
+    const title = columnTitle.trim();
+    if (!title) {
+      return;
+    }
+
+    try {
+      const nextBoard = normalizeBoard(
+        await requestJSON<Board>(`/api/columns/${renamingColumn.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ title }),
+        }),
+      );
+      setBoard(nextBoard);
+      setBoards((current) => upsertBoardSummary(current, nextBoard));
+      setSelectedCardId((current) => selectedCardIdForBoard(current, nextBoard));
+      setRenamingColumn(null);
+      setColumnTitle('');
+      setError('');
+    } catch {
+      setError('Could not rename the column.');
+    }
+  }
+
   async function createCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!board) {
@@ -360,7 +560,11 @@ function App() {
         }),
       });
 
-      setBoard((current) => addCardToBoard(current, card));
+      const nextBoard = addCardToBoard(board, card);
+      setBoard(nextBoard);
+      if (nextBoard) {
+        setBoards((current) => upsertBoardSummary(current, nextBoard));
+      }
       setSelectedCardId(card.id);
       setNewCardTitle('');
       setNewCardOwner('');
@@ -575,6 +779,14 @@ function App() {
             <span className="max-w-36 truncate">{currentUser?.displayName || currentUser?.email}</span>
           </div>
           <button
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            type="button"
+            onClick={() => setIsCreateBoardOpen(true)}
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            New Board
+          </button>
+          <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
             type="button"
             onClick={() => setIsCreateOpen(true)}
@@ -633,9 +845,42 @@ function App() {
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Platform Engineering</p>
                   <h1 className="text-2xl font-semibold tracking-normal">{board?.name ?? 'Loading board'}</h1>
                 </div>
-                <div className="flex items-center gap-2 text-sm text-slate-600">
-                  <CalendarDays className="h-4 w-4 text-slate-400" aria-hidden="true" />
-                  Sprint window Apr 28 - May 12
+                <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="board-selector">
+                      Board
+                    </label>
+                    <select
+                      id="board-selector"
+                      className="h-9 min-w-48 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={selectedBoardId}
+                      onChange={(event) => selectBoard(event.target.value)}
+                    >
+                      {boards.length > 0 ? (
+                        boards.map((summary) => (
+                          <option key={summary.id} value={summary.id}>
+                            {summary.name}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">No boards</option>
+                      )}
+                    </select>
+                  </div>
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    type="button"
+                    aria-label="Open add column"
+                    onClick={() => setIsCreateColumnOpen(true)}
+                    disabled={!board}
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    Add Column
+                  </button>
+                  <div className="hidden h-9 items-center gap-2 text-sm text-slate-600 md:flex">
+                    <CalendarDays className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                    Sprint window Apr 28 - May 12
+                  </div>
                 </div>
               </div>
 
@@ -650,15 +895,18 @@ function App() {
               ) : (
                 <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
                   <div className="overflow-x-auto pb-2">
-                    <section className="grid min-w-[64rem] gap-3 lg:grid-cols-4" aria-label="Kanban board">
+                    <section
+                      className="grid min-w-[64rem] gap-3"
+                      style={{ gridTemplateColumns: `repeat(${Math.max(filteredColumns.length, 1)}, minmax(15rem, 1fr))` }}
+                      aria-label="Kanban board"
+                    >
                       {filteredColumns.map((column) => (
                         <KanbanColumn
                           key={column.id}
                           column={column}
-                          allColumns={board.columns}
                           selectedCardId={selectedCard?.id ?? ''}
-                          onMoveCard={moveCard}
                           onSelectCard={setSelectedCardId}
+                          onRenameColumn={startRenamingColumn}
                         />
                       ))}
                     </section>
@@ -850,28 +1098,15 @@ function App() {
                     <Plus className="mx-auto h-4 w-4" aria-hidden="true" />
                   </button>
                 </div>
-                <div className="divide-y divide-slate-200 rounded-md border border-slate-200">
-                  {filteredWikiPages.length > 0 ? (
-                    filteredWikiPages.map((page) => (
-                      <button
-                        key={page.id}
-                        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50"
-                        type="button"
-                        onClick={() => loadWikiPage(page.id)}
-                      >
-                        <span>{page.title}</span>
-                        <BookOpen className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-                      </button>
-                    ))
-                  ) : (
-                    <p className="px-3 py-2 text-sm text-slate-500">No matching pages</p>
-                  )}
-                </div>
+                <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
               </aside>
             </div>
           </>
         ) : (
           <main className="min-w-0 p-4 lg:col-span-2">
+            {error ? (
+              <p className="mb-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
+            ) : null}
             {activeView === 'wiki' ? (
               <section className="max-w-5xl">
                 <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -889,25 +1124,7 @@ function App() {
                   </button>
                 </div>
                 <div className="grid gap-3 md:grid-cols-[16rem_minmax(0,1fr)]">
-                  <div className="divide-y divide-slate-200 rounded-md border border-slate-200 bg-white">
-                    {filteredWikiPages.length > 0 ? (
-                      filteredWikiPages.map((page) => (
-                        <button
-                          key={page.id}
-                          className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${
-                            selectedWikiPage?.id === page.id ? 'bg-slate-100 font-medium text-slate-950' : ''
-                          }`}
-                          type="button"
-                          onClick={() => loadWikiPage(page.id)}
-                        >
-                          <span>{page.title}</span>
-                          <BookOpen className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-                        </button>
-                      ))
-                    ) : (
-                      <p className="px-3 py-2 text-sm text-slate-500">No matching pages</p>
-                    )}
-                  </div>
+                  <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
                   <div className="rounded-md border border-slate-200 bg-white p-4">
                     {selectedWikiPage || isCreatingWikiPage ? (
                       <form className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" onSubmit={submitWikiPage}>
@@ -946,7 +1163,7 @@ function App() {
                             </button>
                           </div>
                         </div>
-                        <article className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-4">
+                        <article className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-4" aria-label="Markdown preview">
                           <MarkdownPreview markdown={wikiForm.bodyMarkdown} />
                         </article>
                       </form>
@@ -979,6 +1196,141 @@ function App() {
           </main>
         )}
       </div>
+
+      {isCreateBoardOpen ? (
+        <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
+          <form
+            className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-board-title"
+            onSubmit={createBoard}
+          >
+            <div className="mb-4">
+              <h2 id="create-board-title" className="text-lg font-semibold">
+                Create Board
+              </h2>
+              <p className="text-sm text-slate-500">Start a new persisted board in this workspace.</p>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="board-name">
+                Board name
+              </label>
+              <input
+                id="board-name"
+                name="name"
+                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                value={newBoardName}
+                onChange={(event) => setNewBoardName(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsCreateBoardOpen(false)}
+              >
+                Cancel
+              </button>
+              <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
+                Create Board
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {isCreateColumnOpen ? (
+        <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
+          <form
+            className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-column-title"
+            onSubmit={createColumn}
+          >
+            <div className="mb-4">
+              <h2 id="create-column-title" className="text-lg font-semibold">
+                Add Column
+              </h2>
+              <p className="text-sm text-slate-500">Add another workflow state to this board.</p>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="new-column-title">
+                Column title
+              </label>
+              <input
+                id="new-column-title"
+                name="title"
+                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                value={newColumnTitle}
+                onChange={(event) => setNewColumnTitle(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsCreateColumnOpen(false)}
+              >
+                Cancel
+              </button>
+              <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
+                Add column
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {renamingColumn ? (
+        <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
+          <form
+            className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-column-title"
+            onSubmit={renameColumn}
+          >
+            <div className="mb-4">
+              <h2 id="rename-column-title" className="text-lg font-semibold">
+                Rename Column
+              </h2>
+              <p className="text-sm text-slate-500">Update this board column title.</p>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="rename-column-input">
+                Column title
+              </label>
+              <input
+                id="rename-column-input"
+                name="title"
+                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                value={columnTitle}
+                onChange={(event) => setColumnTitle(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                type="button"
+                onClick={() => {
+                  setRenamingColumn(null);
+                  setColumnTitle('');
+                }}
+              >
+                Cancel
+              </button>
+              <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
+                Save column
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
       {isCreateOpen ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
@@ -1136,16 +1488,14 @@ function LoginScreen({
 
 function KanbanColumn({
   column,
-  allColumns,
   selectedCardId,
-  onMoveCard,
   onSelectCard,
+  onRenameColumn,
 }: {
   column: Column;
-  allColumns: Column[];
   selectedCardId: string;
-  onMoveCard: (cardId: string, columnId: string, position: number) => void;
   onSelectCard: (cardId: string) => void;
+  onRenameColumn: (column: Column) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: column.id,
@@ -1167,9 +1517,11 @@ function KanbanColumn({
         <button
           className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100"
           type="button"
-          aria-label={`Column actions for ${column.title}`}
+          aria-label={`Rename ${column.title}`}
+          title={`Rename ${column.title}`}
+          onClick={() => onRenameColumn(column)}
         >
-          <MoreHorizontal className="mx-auto h-4 w-4" aria-hidden="true" />
+          <Pencil className="mx-auto h-4 w-4" aria-hidden="true" />
         </button>
       </div>
       <SortableContext items={column.cards.map((card) => card.id)} strategy={verticalListSortingStrategy}>
@@ -1179,9 +1531,7 @@ function KanbanColumn({
               <SortableCard
                 key={card.id}
                 card={card}
-                columns={allColumns}
                 selected={selectedCardId === card.id}
-                onMoveCard={onMoveCard}
                 onSelectCard={onSelectCard}
               />
             ))
@@ -1196,15 +1546,11 @@ function KanbanColumn({
 
 function SortableCard({
   card,
-  columns,
   selected,
-  onMoveCard,
   onSelectCard,
 }: {
   card: Card;
-  columns: Column[];
   selected: boolean;
-  onMoveCard: (cardId: string, columnId: string, position: number) => void;
   onSelectCard: (cardId: string) => void;
 }) {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
@@ -1219,51 +1565,37 @@ function SortableCard({
   return (
     <article
       ref={setNodeRef}
-      className={`rounded-md border bg-white p-3 shadow-sm ${selected ? 'border-slate-950 ring-1 ring-slate-950' : 'border-slate-200'} ${
+      className={`rounded-md border bg-white shadow-sm ${selected ? 'border-slate-950 ring-1 ring-slate-950' : 'border-slate-200'} ${
         isDragging ? 'opacity-60' : ''
       }`}
       style={style}
     >
-      <div className="mb-3 flex items-start gap-2">
-        <button
-          className="mt-0.5 h-7 w-7 shrink-0 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-          type="button"
-          aria-label={`Drag ${card.title}`}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="mx-auto h-4 w-4" aria-hidden="true" />
-        </button>
-        <button className="min-w-0 flex-1 text-left" type="button" aria-label={`View card ${card.title}`} onClick={() => onSelectCard(card.id)}>
-          <span className="mb-2 flex items-start justify-between gap-2">
-            <span className="text-sm font-medium leading-5">{card.title}</span>
-            <span className={priorityClass(card.priority)}>{card.priority}</span>
+      <button
+        className="block w-full cursor-grab rounded-md p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-slate-950 active:cursor-grabbing"
+        type="button"
+        aria-label={`View card ${card.title}`}
+        onClick={() => onSelectCard(card.id)}
+        {...attributes}
+        {...listeners}
+      >
+        <span className="mb-3 block">
+          <span className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</span>
+          <span className="mt-1 block text-sm font-medium leading-5 text-slate-900">{card.title}</span>
+        </span>
+        <span className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5" aria-label={`Owner ${card.owner}`}>
+            <UserRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+            {card.owner}
           </span>
-          <span className="flex items-center justify-between text-xs text-slate-500">
-            <span className="inline-flex items-center gap-1">
-              <UserRound className="h-3.5 w-3.5" aria-hidden="true" />
-              {card.owner}
-            </span>
+          <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
+            <PriorityIcon priority={card.priority} />
+          </span>
+          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5" aria-label={`Due ${card.due}`}>
+            <CalendarDays className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
             <span>{card.due}</span>
           </span>
-        </button>
-      </div>
-      <div className="flex justify-end gap-1 border-t border-slate-100 pt-2">
-        {columns
-          .filter((column) => column.id !== card.columnId)
-          .map((column) => (
-            <button
-              key={column.id}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-              type="button"
-              aria-label={`Move ${card.title} to ${column.title}`}
-              title={`Move to ${column.title}`}
-              onClick={() => onMoveCard(card.id, column.id, column.cards.length)}
-            >
-              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-          ))}
-      </div>
+        </span>
+      </button>
     </article>
   );
 }
@@ -1345,6 +1677,27 @@ function defaultSelectedCardId(board: Board) {
   return cards.find((card) => card.title === 'Ready for review API shape')?.id ?? cards[0]?.id ?? '';
 }
 
+function selectedCardIdForBoard(currentCardId: string, board: Board) {
+  if (currentCardId && findCard(board, currentCardId)) {
+    return currentCardId;
+  }
+  return defaultSelectedCardId(board);
+}
+
+function upsertBoardSummary(summaries: BoardSummary[], board: Board): BoardSummary[] {
+  const existing = summaries.find((summary) => summary.id === board.id);
+  const nextSummary: BoardSummary = {
+    id: board.id,
+    workspaceId: existing?.workspaceId ?? '',
+    name: board.name,
+    slug: board.slug,
+    columnCount: board.columns.length,
+    cardCount: board.columns.reduce((total, column) => total + column.cards.length, 0),
+  };
+
+  return [...summaries.filter((summary) => summary.id !== board.id), nextSummary].sort((left, right) => left.name.localeCompare(right.name));
+}
+
 function addCardToBoard(board: Board | null, card: Card): Board | null {
   if (!board) {
     return board;
@@ -1410,7 +1763,7 @@ function formFromWikiPage(page: WikiPage): WikiForm {
   };
 }
 
-function resolveMoveTarget(board: Board, overId: string) {
+export function resolveMoveTarget(board: Board, overId: string) {
   const column = board.columns.find((candidate) => candidate.id === overId);
   if (column) {
     return { columnId: column.id, position: column.cards.length };
@@ -1430,17 +1783,30 @@ function findCard(board: Board, cardId: string) {
   return board.columns.flatMap((column) => column.cards).find((card) => card.id === cardId);
 }
 
-function priorityClass(priority: Priority) {
-  const base = 'rounded px-1.5 py-0.5 text-xs font-medium';
+function priorityChipClass(priority: Priority) {
+  const base = 'inline-flex h-6 w-6 items-center justify-center rounded-md border';
   switch (priority) {
     case 'Urgent':
-      return `${base} bg-rose-50 text-rose-700`;
+      return `${base} border-rose-200 bg-rose-50 text-rose-600`;
     case 'High':
-      return `${base} bg-amber-50 text-amber-700`;
+      return `${base} border-amber-200 bg-amber-50 text-amber-600`;
     case 'Low':
-      return `${base} bg-emerald-50 text-emerald-700`;
+      return `${base} border-emerald-200 bg-emerald-50 text-emerald-600`;
     default:
-      return `${base} bg-slate-100 text-slate-600`;
+      return `${base} border-slate-200 bg-white text-slate-500`;
+  }
+}
+
+function PriorityIcon({ priority }: { priority: Priority }) {
+  switch (priority) {
+    case 'Urgent':
+      return <CircleAlert className="h-3.5 w-3.5" aria-hidden="true" />;
+    case 'High':
+      return <SignalHigh className="h-3.5 w-3.5" aria-hidden="true" />;
+    case 'Low':
+      return <SignalLow className="h-3.5 w-3.5" aria-hidden="true" />;
+    default:
+      return <CircleDot className="h-3.5 w-3.5" aria-hidden="true" />;
   }
 }
 
@@ -1464,67 +1830,152 @@ function ownerInitials(value: string) {
   return owner || 'ME';
 }
 
-function MarkdownPreview({ markdown }: { markdown: string }) {
-  const lines = markdown.split(/\r?\n/);
-  const nodes: ReactNode[] = [];
-  let index = 0;
+function WikiPageTree({
+  pages,
+  selectedPageId,
+  onSelect,
+}: {
+  pages: WikiPage[];
+  selectedPageId?: string;
+  onSelect: (pageId: string) => void;
+}) {
+  const tree = buildWikiPageTree(pages);
 
-  while (index < lines.length) {
-    const line = lines[index].trim();
-    if (!line) {
-      index += 1;
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      const level = heading[1].length;
-      const text = heading[2];
-      const className = level === 1 ? 'text-xl font-semibold' : 'text-lg font-semibold';
-      nodes.push(
-        level === 1 ? (
-          <h2 key={`heading-${index}`} className={className}>
-            {text}
-          </h2>
-        ) : (
-          <h3 key={`heading-${index}`} className={className}>
-            {text}
-          </h3>
-        ),
-      );
-      index += 1;
-      continue;
-    }
-
-    if (line.startsWith('- ')) {
-      const items: string[] = [];
-      while (index < lines.length && lines[index].trim().startsWith('- ')) {
-        items.push(lines[index].trim().slice(2));
-        index += 1;
-      }
-      nodes.push(
-        <ul key={`list-${index}`} className="list-disc space-y-1 pl-5 text-sm text-slate-700">
-          {items.map((item, itemIndex) => (
-            <li key={`${item}-${itemIndex}`}>{item}</li>
+  return (
+    <nav aria-label="Wiki page tree" className="rounded-md border border-slate-200 bg-white p-1">
+      {tree.length ? (
+        <ul className="space-y-1">
+          {tree.map((node) => (
+            <WikiPageTreeNodeItem key={node.key} node={node} depth={0} selectedPageId={selectedPageId} onSelect={onSelect} />
           ))}
-        </ul>,
-      );
-      continue;
-    }
+        </ul>
+      ) : (
+        <p className="px-2 py-2 text-sm text-slate-500">No matching pages</p>
+      )}
+    </nav>
+  );
+}
 
-    const paragraph: string[] = [];
-    while (index < lines.length && lines[index].trim() && !lines[index].trim().startsWith('- ')) {
-      paragraph.push(lines[index].trim());
-      index += 1;
-    }
-    nodes.push(
-      <p key={`paragraph-${index}`} className="text-sm leading-6 text-slate-700">
-        {paragraph.join(' ')}
-      </p>,
-    );
+function WikiPageTreeNodeItem({
+  node,
+  depth,
+  selectedPageId,
+  onSelect,
+}: {
+  node: WikiTreeNode;
+  depth: number;
+  selectedPageId?: string;
+  onSelect: (pageId: string) => void;
+}) {
+  const paddingLeft = `${0.5 + depth * 0.85}rem`;
+
+  return (
+    <li>
+      {node.page ? (
+        <button
+          aria-current={selectedPageId === node.page.id ? 'page' : undefined}
+          aria-label={`Open wiki page ${node.page.title}`}
+          className={`flex min-h-9 w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-slate-50 ${
+            selectedPageId === node.page.id ? 'bg-slate-100 font-medium text-slate-950' : 'text-slate-700'
+          }`}
+          style={{ paddingLeft }}
+          type="button"
+          onClick={() => onSelect(node.page!.id)}
+        >
+          <BookOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
+          <span className="min-w-0 truncate">{node.label}</span>
+        </button>
+      ) : (
+        <div className="flex min-h-8 items-center gap-2 px-2 py-1 text-xs font-semibold text-slate-500" style={{ paddingLeft }}>
+          <Folder className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
+          <span className="min-w-0 truncate">{node.label}</span>
+        </div>
+      )}
+      {node.children.length ? (
+        <ul className="space-y-1">
+          {node.children.map((child) => (
+            <WikiPageTreeNodeItem key={child.key} node={child} depth={depth + 1} selectedPageId={selectedPageId} onSelect={onSelect} />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+function buildWikiPageTree(pages: WikiPage[]): WikiTreeNode[] {
+  const root: WikiTreeNode[] = [];
+
+  for (const page of [...pages].sort((left, right) => left.title.localeCompare(right.title))) {
+    const segments = page.title
+      .split('/')
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    const path = segments.length ? segments : [page.title];
+    let branch = root;
+    let keyPath = '';
+
+    path.forEach((segment, index) => {
+      keyPath = keyPath ? `${keyPath}/${segment}` : segment;
+      const isLeaf = index === path.length - 1;
+      let node = branch.find((candidate) => candidate.label === segment);
+      if (!node) {
+        node = {
+          key: isLeaf ? page.id : `folder:${keyPath}`,
+          label: segment,
+          page: null,
+          children: [],
+        };
+        branch.push(node);
+      }
+      if (isLeaf) {
+        node.key = page.id;
+        node.page = page;
+      }
+      branch = node.children;
+    });
   }
 
-  return <div className="space-y-3">{nodes.length ? nodes : <p className="text-sm text-slate-500">No content yet</p>}</div>;
+  return root;
+}
+
+function MarkdownPreview({ markdown }: { markdown: string }) {
+  if (!markdown.trim()) {
+    return <p className="text-sm text-slate-500">No content yet</p>;
+  }
+
+  return (
+    <div className="space-y-3 text-sm leading-6 text-slate-700">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          h1: ({ children }) => <h2 className="text-xl font-semibold text-slate-950">{children}</h2>,
+          h2: ({ children }) => <h3 className="text-lg font-semibold text-slate-950">{children}</h3>,
+          h3: ({ children }) => <h4 className="text-base font-semibold text-slate-950">{children}</h4>,
+          p: ({ children }) => <p>{children}</p>,
+          a: ({ children, href }) => (
+            <a className="font-medium text-sky-700 underline underline-offset-2" href={href} rel="noreferrer" target="_blank">
+              {children}
+            </a>
+          ),
+          ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
+          li: ({ children }) => <li>{children}</li>,
+          blockquote: ({ children }) => <blockquote className="border-l-2 border-slate-300 pl-3 text-slate-600">{children}</blockquote>,
+          code: ({ children, className }) => (
+            <code className={`${className ?? ''} rounded bg-slate-200 px-1 py-0.5 font-mono text-[0.85em] text-slate-900`}>{children}</code>
+          ),
+          pre: ({ children }) => <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-50">{children}</pre>,
+          hr: () => <hr className="border-slate-200" />,
+          table: ({ children }) => <table className="w-full border-collapse text-left text-sm">{children}</table>,
+          th: ({ children }) => <th className="border border-slate-200 bg-slate-100 px-2 py-1 font-semibold">{children}</th>,
+          td: ({ children }) => <td className="border border-slate-200 px-2 py-1">{children}</td>,
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 export default App;

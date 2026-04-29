@@ -82,6 +82,208 @@ func TestDefaultBoardSeedsOnceAndPersistsCardMoves(t *testing.T) {
 	}
 }
 
+func TestBoardManagementCreatesListsAndLoadsBoards(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	workspaces, err := store.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkspaces returned error: %v", err)
+	}
+	if len(workspaces) != 1 {
+		t.Fatalf("len(workspaces) = %d, want 1", len(workspaces))
+	}
+	if workspaces[0].Name != "Platform Engineering" {
+		t.Fatalf("workspace name = %q, want Platform Engineering", workspaces[0].Name)
+	}
+
+	boards, err := store.ListBoards(ctx)
+	if err != nil {
+		t.Fatalf("ListBoards returned error: %v", err)
+	}
+	if len(boards) != 1 {
+		t.Fatalf("len(boards) = %d, want seeded default board", len(boards))
+	}
+	if boards[0].Name != "Platform Board" {
+		t.Fatalf("default board name = %q", boards[0].Name)
+	}
+	if boards[0].ColumnCount != 4 {
+		t.Fatalf("default board column count = %d, want 4", boards[0].ColumnCount)
+	}
+	if boards[0].CardCount == 0 {
+		t.Fatal("default board summary card count = 0, want seeded cards")
+	}
+
+	created, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Release Train"})
+	if err != nil {
+		t.Fatalf("CreateBoard returned error: %v", err)
+	}
+	if created.Name != "Release Train" {
+		t.Fatalf("created board name = %q", created.Name)
+	}
+	if created.Slug != "release-train" {
+		t.Fatalf("created slug = %q, want release-train", created.Slug)
+	}
+	if len(created.Columns) != 4 {
+		t.Fatalf("created board columns = %d, want template columns", len(created.Columns))
+	}
+	if len(created.WikiPages) != 0 {
+		t.Fatalf("created board wiki pages = %d, want 0", len(created.WikiPages))
+	}
+
+	loaded, err := store.GetBoard(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetBoard returned error: %v", err)
+	}
+	if loaded.ID != created.ID {
+		t.Fatalf("loaded board ID = %q, want %q", loaded.ID, created.ID)
+	}
+
+	duplicateSlug, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Release Train"})
+	if err != nil {
+		t.Fatalf("duplicate slug CreateBoard returned error: %v", err)
+	}
+	if duplicateSlug.Slug != "release-train-2" {
+		t.Fatalf("duplicate slug = %q, want release-train-2", duplicateSlug.Slug)
+	}
+
+	boards, err = store.ListBoards(ctx)
+	if err != nil {
+		t.Fatalf("ListBoards after create returned error: %v", err)
+	}
+	if len(boards) != 3 {
+		t.Fatalf("len(boards) = %d, want default plus two created boards", len(boards))
+	}
+	if boards[1].Name != "Release Train" || boards[2].Name != "Release Train" {
+		t.Fatalf("boards not sorted by name/id as expected: %#v", boards)
+	}
+}
+
+func TestDefaultBoardPreservesLegacySeededColumnNames(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	_, err := store.Conn.SQL.ExecContext(ctx, `
+		INSERT INTO workspaces (id, name, slug) VALUES ('workspace-1', 'Platform Engineering', 'platform-engineering');
+		INSERT INTO boards (id, workspace_id, name, slug, description) VALUES ('board-1', 'workspace-1', 'Platform Board', 'platform', 'Legacy local board.');
+		INSERT INTO columns (id, board_id, name, position) VALUES
+			('column-todo', 'board-1', 'Todo', 0),
+			('column-progress', 'board-1', 'In progress', 1),
+			('column-review', 'board-1', 'Ready for review', 2),
+			('column-done', 'board-1', 'Done', 3);
+	`)
+	if err != nil {
+		t.Fatalf("seed legacy columns returned error: %v", err)
+	}
+
+	boards, err := store.ListBoards(ctx)
+	if err != nil {
+		t.Fatalf("ListBoards returned error for legacy columns: %v", err)
+	}
+	if len(boards) != 1 {
+		t.Fatalf("len(boards) = %d, want one legacy board", len(boards))
+	}
+	if boards[0].ColumnCount != 4 {
+		t.Fatalf("legacy board column count = %d, want 4", boards[0].ColumnCount)
+	}
+
+	board, err := store.GetDefaultBoard(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultBoard returned error after repair: %v", err)
+	}
+	wantTitles := []string{"Todo", "In progress", "Ready for review", "Done"}
+	if len(board.Columns) != len(wantTitles) {
+		t.Fatalf("len(board.Columns) = %d, want %d", len(board.Columns), len(wantTitles))
+	}
+	for index, want := range wantTitles {
+		if board.Columns[index].Title != want {
+			t.Fatalf("column[%d] title = %q, want %q", index, board.Columns[index].Title, want)
+		}
+	}
+}
+
+func TestDefaultBoardPreservesRenamedSeededColumns(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	board, err := store.GetDefaultBoard(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultBoard returned error: %v", err)
+	}
+	planned := findColumn(t, board, "Planned")
+	if _, err := store.UpdateColumn(ctx, UpdateColumnParams{
+		ColumnID: planned.ID,
+		Title:    "Discovery",
+	}); err != nil {
+		t.Fatalf("UpdateColumn returned error: %v", err)
+	}
+
+	if _, err := store.ListBoards(ctx); err != nil {
+		t.Fatalf("ListBoards after column rename returned error: %v", err)
+	}
+	reloaded, err := store.GetDefaultBoard(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultBoard after rename returned error: %v", err)
+	}
+	if len(reloaded.Columns) != 4 {
+		t.Fatalf("len(reloaded.Columns) = %d, want 4 without reseeding renamed column", len(reloaded.Columns))
+	}
+	if reloaded.Columns[0].Title != "Discovery" {
+		t.Fatalf("first column title = %q, want renamed text", reloaded.Columns[0].Title)
+	}
+	if hasColumn(reloaded, "Planned") {
+		t.Fatal("renamed default column was reseeded from its display name")
+	}
+}
+
+func TestBoardManagementCreatesAndRenamesColumns(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	board, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Security Backlog"})
+	if err != nil {
+		t.Fatalf("CreateBoard returned error: %v", err)
+	}
+
+	withColumn, err := store.CreateColumn(ctx, CreateColumnParams{
+		BoardID: board.ID,
+		Title:   "Blocked",
+	})
+	if err != nil {
+		t.Fatalf("CreateColumn returned error: %v", err)
+	}
+	blocked := findColumn(t, withColumn, "Blocked")
+	if blocked.Position != 4 {
+		t.Fatalf("blocked position = %d, want next position 4", blocked.Position)
+	}
+
+	renamed, err := store.UpdateColumn(ctx, UpdateColumnParams{
+		ColumnID: blocked.ID,
+		Title:    "Waiting",
+	})
+	if err != nil {
+		t.Fatalf("UpdateColumn returned error: %v", err)
+	}
+	waiting := findColumn(t, renamed, "Waiting")
+	if waiting.ID != blocked.ID {
+		t.Fatalf("renamed column ID = %q, want %q", waiting.ID, blocked.ID)
+	}
+
+	reloaded, err := store.GetBoard(ctx, board.ID)
+	if err != nil {
+		t.Fatalf("GetBoard returned error: %v", err)
+	}
+	findColumn(t, reloaded, "Waiting")
+}
+
 func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 	ctx := context.Background()
 	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
@@ -223,6 +425,94 @@ func TestBoardStoreValidationAndNotFoundPaths(t *testing.T) {
 				return err
 			}(),
 			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "list workspaces missing database",
+			err: func() error {
+				_, err := (BoardStore{}).ListWorkspaces(ctx)
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "list boards missing database",
+			err: func() error {
+				_, err := (BoardStore{}).ListBoards(ctx)
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "create board missing title",
+			err: func() error {
+				_, err := store.CreateBoard(ctx, CreateBoardParams{})
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "get board missing id",
+			err: func() error {
+				_, err := store.GetBoard(ctx, "")
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "get board unknown id",
+			err: func() error {
+				_, err := store.GetBoard(ctx, "missing")
+				return err
+			}(),
+			want: ErrNotFound,
+		},
+		{
+			name: "create column missing board",
+			err: func() error {
+				_, err := store.CreateColumn(ctx, CreateColumnParams{Title: "Blocked"})
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "create column missing title",
+			err: func() error {
+				_, err := store.CreateColumn(ctx, CreateColumnParams{BoardID: board.ID})
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "create column unknown board",
+			err: func() error {
+				_, err := store.CreateColumn(ctx, CreateColumnParams{BoardID: "missing", Title: "Blocked"})
+				return err
+			}(),
+			want: ErrNotFound,
+		},
+		{
+			name: "update column missing id",
+			err: func() error {
+				_, err := store.UpdateColumn(ctx, UpdateColumnParams{Title: "Blocked"})
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "update column missing title",
+			err: func() error {
+				_, err := store.UpdateColumn(ctx, UpdateColumnParams{ColumnID: findColumn(t, board, "Planned").ID})
+				return err
+			}(),
+			want: ErrValidation,
+		},
+		{
+			name: "update column unknown id",
+			err: func() error {
+				_, err := store.UpdateColumn(ctx, UpdateColumnParams{ColumnID: "missing", Title: "Blocked"})
+				return err
+			}(),
+			want: ErrNotFound,
 		},
 		{
 			name: "create card missing title",
@@ -545,6 +835,15 @@ func findColumn(t *testing.T, board Board, title string) BoardColumn {
 	}
 	t.Fatalf("column %q not found", title)
 	return BoardColumn{}
+}
+
+func hasColumn(board Board, title string) bool {
+	for _, column := range board.Columns {
+		if column.Title == title {
+			return true
+		}
+	}
+	return false
 }
 
 func hasActivity(events []ActivityEvent, eventType string) bool {

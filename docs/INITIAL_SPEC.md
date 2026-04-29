@@ -35,6 +35,7 @@ The first version should be boring to operate: one Docker image, one Postgres da
 - Postgres driver: `pgx`.
 - Query layer: `sqlc`.
 - Migrations: `goose` or `golang-migrate`; default recommendation is `goose` for simple SQL migration files and easy embedding.
+- Data identity: every application table has a single UUID `id` primary key. Human-editable names and titles are display text, not durable identity.
 - Auth: first-party session auth stored in Postgres for V1, with OIDC support planned.
 - Config: environment variables.
 - Logging: structured JSON logs.
@@ -67,8 +68,13 @@ Reference self-hosted command shape:
 ```bash
 arqboard serve
 arqboard migrate
+arqboard mcp
 arqboard admin create-user
 ```
+
+`arqboard serve` applies embedded migrations before opening the HTTP listener, and it should no-op cleanly when the target database is already current. `arqboard migrate` remains available for explicit CI, release, or operator-controlled migration runs.
+
+`arqboard mcp` runs a local stdio Model Context Protocol server for trusted local clients. It exposes board, card search, card update, card movement, and wiki tools backed by the same database stores as the HTTP API.
 
 Reference Docker usage:
 
@@ -332,7 +338,7 @@ The first skeleton is complete when:
 - `go test ./...` runs.
 - `npm test` or equivalent frontend check runs, if frontend tests exist.
 - `docker build .` succeeds.
-- `docker run ... serve` starts one HTTP server.
+- `docker run ... serve` applies migrations and starts one HTTP server.
 - `docker run ... migrate` applies migrations to Postgres.
 - `/healthz` returns OK without database access.
 - `/readyz` verifies database connectivity.

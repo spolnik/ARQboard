@@ -8,14 +8,16 @@ The current implementation plan is documented in [docs/INITIAL_SPEC.md](docs/INI
 
 This repo now contains the Go service, database-backed board API, and React web app:
 
-- Go CLI entrypoint: `arqboard serve`, `arqboard migrate`, and `arqboard admin create-user`.
-- HTTP health checks: `/healthz` does not touch the database, `/readyz` checks PostgreSQL.
+- Go CLI entrypoint: `arqboard serve`, `arqboard migrate`, `arqboard mcp`, and `arqboard admin create-user`.
+- HTTP health checks: `/healthz` does not touch the database, `/readyz` checks database connectivity.
 - PostgreSQL and SQLite migrations through Goose-compatible SQL files.
+- `serve` applies embedded migrations before it starts accepting traffic; `migrate` remains available as an explicit pre-flight command.
 - CLI-created admin users can sign in through DB-backed HTTP-only sessions.
 - A seeded default workspace board with persisted columns, cards, card creation, and card movement.
 - Authenticated JSON API endpoints for the default board, card creation, card moves, card detail, comments, and wiki pages.
+- Local stdio MCP server for board, card, and wiki planning tools.
 - React + Vite + TypeScript + Tailwind frontend under `web/`.
-- Drag-and-drop card movement through `dnd-kit`, with accessible button controls for keyboard-friendly moves.
+- Drag-and-drop card movement through `dnd-kit`, using the whole card as the drag surface.
 - Dockerfile, Docker Compose Postgres service, Makefile, and CI workflow.
 
 ## Local Setup
@@ -46,6 +48,9 @@ cd web && npm test
 go run ./cmd/arqboard migrate
 go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple"
 go run ./cmd/arqboard serve
+go run ./cmd/arqboard mcp
 ```
+
+`arqboard mcp` runs a local stdio MCP server for trusted local clients. It applies migrations, opens the configured database, and exposes tools for listing boards, searching cards, creating boards/cards/wiki pages, updating cards/wiki pages, and moving cards.
 
 Set `APP_ENV=production` in deployed environments. In production mode, `DATABASE_URL`, `APP_URL`, and `SESSION_SECRET` are required.

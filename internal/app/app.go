@@ -12,9 +12,11 @@ import (
 	"strings"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spolnik/arqboard/internal/config"
 	"github.com/spolnik/arqboard/internal/db"
 	httpapi "github.com/spolnik/arqboard/internal/http"
+	"github.com/spolnik/arqboard/internal/mcpserver"
 	"github.com/spolnik/arqboard/migrations"
 )
 
@@ -43,6 +45,12 @@ func run(ctx context.Context, args []string, lookup envLookup, stdout io.Writer,
 			return 1
 		}
 		return 0
+	case "mcp":
+		if err := runMCP(ctx, args[1:], lookup, stderr); err != nil {
+			fmt.Fprintf(stderr, "mcp: %v\n", err)
+			return 1
+		}
+		return 0
 	case "admin":
 		if err := admin(ctx, args[1:], lookup, stdout); err != nil {
 			fmt.Fprintf(stderr, "admin: %v\n", err)
@@ -57,7 +65,7 @@ func run(ctx context.Context, args []string, lookup envLookup, stdout io.Writer,
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: arqboard <serve|migrate|admin>")
+	fmt.Fprintln(w, "usage: arqboard <serve|migrate|mcp|admin>")
 }
 
 func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Writer) error {
@@ -72,13 +80,20 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 		return err
 	}
 
+	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	logger.Info("applying migrations")
+	if err := prepareDatabase(ctx, cfg.DatabaseURL); err != nil {
+		logger.Error("database migration failed", "error", err)
+		return err
+	}
+	logger.Info("database migrations ready")
+
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	logger := slog.New(slog.NewJSONHandler(stderr, nil))
 	router := httpapi.NewRouter(httpapi.Options{
 		Readiness:  db.ReadinessChecker{Conn: pool},
 		BoardStore: db.BoardStore{Conn: pool},
@@ -115,22 +130,56 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 	}
 }
 
+func prepareDatabase(ctx context.Context, databaseURL string) error {
+	migrationFS, err := migrations.ForDriver(string(db.DriverForURL(databaseURL)))
+	if err != nil {
+		return err
+	}
+	return db.MigrateUp(ctx, databaseURL, migrationFS)
+}
+
 func migrate(ctx context.Context, lookup envLookup, stdout io.Writer) error {
 	databaseURL, err := databaseURLFromEnv(lookup)
 	if err != nil {
 		return err
 	}
 
-	migrationFS, err := migrations.ForDriver(string(db.DriverForURL(databaseURL)))
-	if err != nil {
-		return err
-	}
-
-	if err := db.MigrateUp(ctx, databaseURL, migrationFS); err != nil {
+	if err := prepareDatabase(ctx, databaseURL); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "migrations applied")
 	return nil
+}
+
+func runMCP(ctx context.Context, args []string, lookup envLookup, stderr io.Writer) error {
+	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	databaseURL, err := databaseURLFromEnv(lookup)
+	if err != nil {
+		return err
+	}
+
+	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	logger.Info("applying migrations")
+	if err := prepareDatabase(ctx, databaseURL); err != nil {
+		logger.Error("database migration failed", "error", err)
+		return err
+	}
+	logger.Info("database migrations ready")
+
+	conn, err := db.Open(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	logger.Info("starting mcp server", "transport", "stdio")
+	server := mcpserver.New(db.BoardStore{Conn: conn})
+	return server.Run(ctx, &sdkmcp.StdioTransport{})
 }
 
 func admin(ctx context.Context, args []string, lookup envLookup, stdout io.Writer) error {
