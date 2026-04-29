@@ -19,6 +19,8 @@ import {
   FilePlus2,
   GripVertical,
   LayoutDashboard,
+  LogIn,
+  LogOut,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -28,12 +30,21 @@ import {
   Settings,
   UserRound,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
 type View = 'boards' | 'wiki' | 'settings';
 
+type AuthState = 'loading' | 'authenticated' | 'unauthenticated';
+
 type Priority = 'Low' | 'Normal' | 'High' | 'Urgent';
+
+type CurrentUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  isAdmin: boolean;
+};
 
 type Card = {
   id: string;
@@ -103,6 +114,11 @@ type WikiForm = {
 };
 
 function App() {
+  const [authState, setAuthState] = useState<AuthState>('loading');
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
   const [activeView, setActiveView] = useState<View>('boards');
   const [board, setBoard] = useState<Board | null>(null);
   const [selectedCardId, setSelectedCardId] = useState('');
@@ -125,6 +141,18 @@ function App() {
   const [newComment, setNewComment] = useState('');
   const [error, setError] = useState('');
 
+  const resetWorkspace = useCallback(() => {
+    setBoard(null);
+    setSelectedCardId('');
+    setCardDetail(null);
+    setIsEditingCard(false);
+    setIsCreateOpen(false);
+    setSelectedWikiPage(null);
+    setIsCreatingWikiPage(false);
+    setNewComment('');
+    setError('');
+  }, []);
+
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -137,9 +165,58 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    async function loadCurrentUser() {
+      try {
+        const response = await fetch('/api/me');
+        if (response.status === 401) {
+          if (!cancelled) {
+            setAuthState('unauthenticated');
+            setCurrentUser(null);
+          }
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load current user: ${response.status}`);
+        }
+        const user = (await response.json()) as CurrentUser;
+        if (!cancelled) {
+          setCurrentUser(user);
+          setAuthState('authenticated');
+          setLoginError('');
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthState('unauthenticated');
+          setCurrentUser(null);
+          setLoginError('Could not check your session.');
+        }
+      }
+    }
+
+    loadCurrentUser();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authState !== 'authenticated') {
+      return;
+    }
+
+    let cancelled = false;
+
     async function loadBoard() {
       try {
         const response = await fetch('/api/boards/default');
+        if (response.status === 401) {
+          if (!cancelled) {
+            resetWorkspace();
+            setAuthState('unauthenticated');
+            setCurrentUser(null);
+          }
+          return;
+        }
         if (!response.ok) {
           throw new Error(`Failed to load board: ${response.status}`);
         }
@@ -160,10 +237,10 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authState, resetWorkspace]);
 
   useEffect(() => {
-    if (!selectedCardId) {
+    if (authState !== 'authenticated' || !selectedCardId) {
       setCardDetail(null);
       return;
     }
@@ -190,7 +267,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCardId]);
+  }, [authState, selectedCardId]);
 
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
@@ -219,6 +296,42 @@ function App() {
 
     return wikiPages.filter((page) => page.title.toLowerCase().includes(normalizedSearch));
   }, [board, normalizedSearch]);
+
+  async function signIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const email = loginEmail.trim();
+    const password = loginPassword;
+    if (!email || !password.trim()) {
+      setLoginError('Email and password are required.');
+      return;
+    }
+
+    try {
+      const user = await requestJSON<CurrentUser>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
+      setCurrentUser(user);
+      setAuthState('authenticated');
+      setLoginPassword('');
+      setLoginError('');
+      setError('');
+    } catch {
+      setLoginError('Invalid email or password.');
+    }
+  }
+
+  async function signOut() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      resetWorkspace();
+      setCurrentUser(null);
+      setAuthState('unauthenticated');
+      setLoginPassword('');
+    }
+  }
 
   async function createCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -415,6 +528,23 @@ function App() {
     await moveCard(activeCard.id, target.columnId, target.position);
   }
 
+  if (authState === 'loading') {
+    return <LoadingScreen />;
+  }
+
+  if (authState === 'unauthenticated') {
+    return (
+      <LoginScreen
+        email={loginEmail}
+        password={loginPassword}
+        error={loginError}
+        onEmailChange={setLoginEmail}
+        onPasswordChange={setLoginPassword}
+        onSubmit={signIn}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4">
@@ -440,6 +570,10 @@ function App() {
           />
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-600 sm:flex">
+            <UserRound className="h-4 w-4 text-slate-400" aria-hidden="true" />
+            <span className="max-w-36 truncate">{currentUser?.displayName || currentUser?.email}</span>
+          </div>
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
             type="button"
@@ -455,6 +589,14 @@ function App() {
             aria-label="Notifications"
           >
             <Bell className="h-4 w-4" aria-hidden="true" />
+          </button>
+          <button
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            type="button"
+            onClick={signOut}
+          >
+            <LogOut className="h-4 w-4" aria-hidden="true" />
+            Sign out
           </button>
         </div>
       </header>
@@ -489,7 +631,7 @@ function App() {
               <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Platform Engineering</p>
-                  <h1 className="text-2xl font-semibold tracking-normal">{board?.name ?? 'Platform Board'}</h1>
+                  <h1 className="text-2xl font-semibold tracking-normal">{board?.name ?? 'Loading board'}</h1>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-600">
                   <CalendarDays className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -896,6 +1038,98 @@ function App() {
           </form>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="flex h-14 items-center border-b border-slate-200 bg-white px-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-950 text-sm font-semibold text-white">A</div>
+          <div>
+            <p className="text-sm font-semibold leading-4">ARQboard</p>
+            <p className="text-xs text-slate-500">Self-hosted workspace</p>
+          </div>
+        </div>
+      </header>
+      <main className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center px-4">
+        <p className="rounded-md border border-dashed border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">Loading workspace...</p>
+      </main>
+    </div>
+  );
+}
+
+function LoginScreen({
+  email,
+  password,
+  error,
+  onEmailChange,
+  onPasswordChange,
+  onSubmit,
+}: {
+  email: string;
+  password: string;
+  error: string;
+  onEmailChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="flex h-14 items-center border-b border-slate-200 bg-white px-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-950 text-sm font-semibold text-white">A</div>
+          <div>
+            <p className="text-sm font-semibold leading-4">ARQboard</p>
+            <p className="text-xs text-slate-500">Self-hosted workspace</p>
+          </div>
+        </div>
+      </header>
+      <main className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center px-4 py-10">
+        <form className="w-full max-w-sm rounded-md border border-slate-200 bg-white p-5 shadow-sm" onSubmit={onSubmit}>
+          <div className="mb-5">
+            <h1 className="text-xl font-semibold tracking-normal">Sign in to ARQboard</h1>
+            <p className="mt-1 text-sm text-slate-500">Use your workspace admin account.</p>
+          </div>
+          {error ? <p className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="login-email">
+                Email
+              </label>
+              <input
+                id="login-email"
+                name="email"
+                autoComplete="username"
+                className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                value={email}
+                onChange={(event) => onEmailChange(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="login-password">
+                Password
+              </label>
+              <input
+                id="login-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                value={password}
+                onChange={(event) => onPasswordChange(event.target.value)}
+              />
+            </div>
+          </div>
+          <button className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
+            <LogIn className="h-4 w-4" aria-hidden="true" />
+            Sign in
+          </button>
+        </form>
+      </main>
     </div>
   );
 }

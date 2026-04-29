@@ -2,6 +2,13 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, vi } from 'vitest';
 import App from './App';
 
+const userFixture = {
+  id: 'user-1',
+  email: 'admin@example.com',
+  displayName: 'Admin',
+  isAdmin: true,
+};
+
 const boardFixture = {
   id: 'board-1',
   name: 'Platform Board',
@@ -149,6 +156,15 @@ describe('App', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/auth/login' && init?.method === 'POST') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/auth/logout' && init?.method === 'POST') {
+          return new Response(null, { status: 204 });
+        }
         if (url === '/api/boards/default') {
           return jsonResponse(boardFixture);
         }
@@ -209,7 +225,13 @@ describe('App', () => {
   it('shows a helpful error when the board cannot load', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse({ error: { code: 'not_ready' } }, 500)),
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        return jsonResponse({ error: { code: 'not_ready' } }, 500);
+      }),
     );
 
     render(<App />);
@@ -230,6 +252,9 @@ describe('App', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
         if (url === '/api/boards/default') {
           return jsonResponse(lowPriorityBoard);
         }
@@ -243,6 +268,176 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByText('Low')).toBeInTheDocument();
+  });
+
+  it('shows login before loading the workspace and signs in with admin credentials', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/me') {
+        return jsonResponse({ error: { code: 'unauthenticated' } }, 401);
+      }
+      if (url === '/api/auth/login' && init?.method === 'POST') {
+        return jsonResponse(userFixture);
+      }
+      if (url === '/api/boards/default') {
+        return jsonResponse(boardFixture);
+      }
+      if (url === '/api/cards/card-2') {
+        return jsonResponse({ card: boardFixture.columns[1].cards[0], comments: [], activity: [] });
+      }
+      throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/boards/default');
+
+    fireEvent.change(screen.getByLabelText(/email/i), {
+      target: { value: 'admin@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'correct horse battery staple' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/auth/login',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            email: 'admin@example.com',
+            password: 'correct horse battery staple',
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('shows a login error when credentials are rejected', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse({ error: { code: 'unauthenticated' } }, 401);
+        }
+        if (url === '/api/auth/login' && init?.method === 'POST') {
+          return jsonResponse({ error: { code: 'unauthenticated' } }, 401);
+        }
+        throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText(/email/i), {
+      target: { value: 'admin@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'wrong password' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+    expect(await screen.findByText(/invalid email or password/i)).toBeInTheDocument();
+  });
+
+  it('requires email and password before calling the login API', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/me') {
+        return jsonResponse({ error: { code: 'unauthenticated' } }, 401);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /sign in/i }));
+
+    expect(await screen.findByText(/email and password are required/i)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/auth/login', expect.anything());
+  });
+
+  it('signs out and returns to the login form', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /sign out/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/auth/logout',
+        expect.objectContaining({
+          method: 'POST',
+        }),
+      ),
+    );
+    expect(await screen.findByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /platform board/i })).not.toBeInTheDocument();
+  });
+
+  it('falls back to the first available card when the preferred default card is absent', async () => {
+    const fallbackBoard = {
+      ...boardFixture,
+      columns: boardFixture.columns.map((column) => ({
+        ...column,
+        cards: column.cards.map((card) => (card.id === 'card-2' ? { ...card, title: 'Different card' } : card)),
+      })),
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards/default') {
+          return jsonResponse(fallbackBoard);
+        }
+        if (url === '/api/cards/card-1') {
+          return jsonResponse({ card: fallbackBoard.columns[0].cards[0], comments: [], activity: [] });
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    const detail = await screen.findByRole('complementary', { name: /card detail/i });
+    expect(within(detail).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
+  });
+
+  it('shows a create-card error when the board has no columns', async () => {
+    const emptyBoard = { ...boardFixture, columns: [], wikiPages: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards/default') {
+          return jsonResponse(emptyBoard);
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /new card/i }));
+    fireEvent.change(screen.getByLabelText(/card title/i), {
+      target: { value: 'Cannot place this yet' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create card/i }));
+
+    expect(await screen.findByText(/this board has no columns/i)).toBeInTheDocument();
   });
 
   it('updates the card detail panel when a card is selected', async () => {

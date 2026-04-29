@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/spolnik/arqboard/internal/db"
 )
@@ -113,6 +114,146 @@ func TestRouterReturnsDefaultBoard(t *testing.T) {
 	}
 	if board.Name != "Platform Board" {
 		t.Fatalf("board.Name = %q, want Platform Board", board.Name)
+	}
+}
+
+func TestRouterLoginSetsSessionCookieAndReturnsUser(t *testing.T) {
+	user := testUser()
+	router := NewRouter(Options{AuthStore: &fakeAuthStore{
+		session: db.LoginSession{
+			User:      user,
+			Token:     "token-123",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}})
+
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(`{
+		"email":"admin@example.com",
+		"password":"correct horse battery staple"
+	}`)))
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+	cookie := res.Header().Get("Set-Cookie")
+	if !strings.Contains(cookie, "arqboard_session=token-123") {
+		t.Fatalf("Set-Cookie = %q, want session token", cookie)
+	}
+	if !strings.Contains(cookie, "HttpOnly") || !strings.Contains(cookie, "SameSite=Lax") {
+		t.Fatalf("Set-Cookie = %q, want HttpOnly SameSite=Lax", cookie)
+	}
+
+	var body db.User
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode returned error: %v", err)
+	}
+	if body.Email != user.Email {
+		t.Fatalf("body.Email = %q, want %q", body.Email, user.Email)
+	}
+}
+
+func TestRouterMeReturnsAuthenticatedUser(t *testing.T) {
+	store := &fakeAuthStore{user: testUser()}
+	router := NewRouter(Options{AuthStore: store})
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if store.currentUserToken != "token-123" {
+		t.Fatalf("currentUserToken = %q, want token-123", store.currentUserToken)
+	}
+	var body db.User
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode returned error: %v", err)
+	}
+	if body.ID != "user-1" {
+		t.Fatalf("body.ID = %q, want user-1", body.ID)
+	}
+}
+
+func TestRouterLogoutRevokesSessionAndClearsCookie(t *testing.T) {
+	store := &fakeAuthStore{}
+	router := NewRouter(Options{AuthStore: store})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if store.loggedOutToken != "token-123" {
+		t.Fatalf("loggedOutToken = %q, want token-123", store.loggedOutToken)
+	}
+	cookie := res.Header().Get("Set-Cookie")
+	if !strings.Contains(cookie, "arqboard_session=") || !strings.Contains(cookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", cookie)
+	}
+}
+
+func TestRouterAuthRejectsMissingOrInvalidCredentials(t *testing.T) {
+	tests := []struct {
+		name      string
+		store     *fakeAuthStore
+		method    string
+		path      string
+		body      string
+		addCookie bool
+		want      int
+	}{
+		{name: "missing me cookie", store: &fakeAuthStore{}, method: http.MethodGet, path: "/api/me", want: http.StatusUnauthorized},
+		{name: "bad login json", store: &fakeAuthStore{}, method: http.MethodPost, path: "/api/auth/login", body: `{`, want: http.StatusBadRequest},
+		{name: "blank login fields", store: &fakeAuthStore{}, method: http.MethodPost, path: "/api/auth/login", body: `{"email":"","password":""}`, want: http.StatusBadRequest},
+		{name: "invalid login", store: &fakeAuthStore{err: db.ErrInvalidCredentials}, method: http.MethodPost, path: "/api/auth/login", body: `{"email":"admin@example.com","password":"wrong"}`, want: http.StatusUnauthorized},
+		{name: "revoked me session", store: &fakeAuthStore{err: db.ErrUnauthenticated}, method: http.MethodGet, path: "/api/me", addCookie: true, want: http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := NewRouter(Options{AuthStore: tt.store})
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			if tt.addCookie {
+				req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			}
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != tt.want {
+				t.Fatalf("status = %d, want %d", res.Code, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouterProtectsWorkspaceAPIsWhenAuthStoreIsConfigured(t *testing.T) {
+	store := &fakeAuthStore{user: testUser()}
+	router := NewRouter(Options{
+		AuthStore:  store,
+		BoardStore: fakeBoardStore{board: testBoard()},
+	})
+
+	unauthenticated := httptest.NewRecorder()
+	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/boards/default", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", unauthenticated.Code, http.StatusUnauthorized)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/boards/default", nil)
+	req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	authenticated := httptest.NewRecorder()
+	router.ServeHTTP(authenticated, req)
+	if authenticated.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d", authenticated.Code, http.StatusOK)
+	}
+	if store.currentUserToken != "token-123" {
+		t.Fatalf("currentUserToken = %q, want token-123", store.currentUserToken)
 	}
 }
 
@@ -397,6 +538,37 @@ type fakeBoardStore struct {
 	err       error
 }
 
+type fakeAuthStore struct {
+	session          db.LoginSession
+	user             db.User
+	err              error
+	currentUserToken string
+	loggedOutToken   string
+}
+
+func (store *fakeAuthStore) Login(_ context.Context, _ db.LoginParams) (db.LoginSession, error) {
+	if store.err != nil {
+		return db.LoginSession{}, store.err
+	}
+	return store.session, nil
+}
+
+func (store *fakeAuthStore) CurrentUser(_ context.Context, token string) (db.User, error) {
+	store.currentUserToken = token
+	if store.err != nil {
+		return db.User{}, store.err
+	}
+	return store.user, nil
+}
+
+func (store *fakeAuthStore) Logout(_ context.Context, token string) error {
+	store.loggedOutToken = token
+	if store.err != nil {
+		return store.err
+	}
+	return nil
+}
+
 func (store fakeBoardStore) GetDefaultBoard(context.Context) (db.Board, error) {
 	if store.err != nil {
 		return db.Board{}, store.err
@@ -465,6 +637,15 @@ func (store fakeBoardStore) UpdateWikiPage(_ context.Context, _ db.UpdateWikiPag
 		return db.WikiPage{}, store.err
 	}
 	return store.wikiPage, nil
+}
+
+func testUser() db.User {
+	return db.User{
+		ID:          "user-1",
+		Email:       "admin@example.com",
+		DisplayName: "Admin",
+		IsAdmin:     true,
+	}
 }
 
 func testBoard() db.Board {

@@ -25,6 +25,7 @@ type Readiness interface {
 type Options struct {
 	Readiness  Readiness
 	BoardStore BoardStore
+	AuthStore  AuthStore
 	StaticFS   fs.FS
 	Logger     *slog.Logger
 }
@@ -40,6 +41,12 @@ type BoardStore interface {
 	GetWikiPage(context.Context, string) (db.WikiPage, error)
 	CreateWikiPage(context.Context, db.CreateWikiPageParams) (db.WikiPage, error)
 	UpdateWikiPage(context.Context, db.UpdateWikiPageParams) (db.WikiPage, error)
+}
+
+type AuthStore interface {
+	Login(context.Context, db.LoginParams) (db.LoginSession, error)
+	CurrentUser(context.Context, string) (db.User, error)
+	Logout(context.Context, string) error
 }
 
 type errorBody struct {
@@ -67,20 +74,27 @@ func NewRouter(opts Options) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+			currentUser(opts.AuthStore)(w, r)
 		})
-		r.Get("/boards/default", defaultBoard(opts.BoardStore))
-		r.Post("/cards", createCard(opts.BoardStore))
-		r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
-		r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
-		r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
-		r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
-		r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore))
-		r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore))
-		r.Get("/wiki", listWikiPages(opts.BoardStore))
-		r.Post("/wiki", createWikiPage(opts.BoardStore))
-		r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore))
-		r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore))
+		r.Post("/auth/login", login(opts.AuthStore))
+		r.Post("/auth/logout", logout(opts.AuthStore))
+		r.Group(func(r chi.Router) {
+			if opts.AuthStore != nil {
+				r.Use(requireAuth(opts.AuthStore))
+			}
+			r.Get("/boards/default", defaultBoard(opts.BoardStore))
+			r.Post("/cards", createCard(opts.BoardStore))
+			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
+			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
+			r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
+			r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
+			r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore))
+			r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore))
+			r.Get("/wiki", listWikiPages(opts.BoardStore))
+			r.Post("/wiki", createWikiPage(opts.BoardStore))
+			r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore))
+			r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore))
+		})
 	})
 
 	if opts.StaticFS != nil {
@@ -120,6 +134,104 @@ type createCardCommentRequest struct {
 type wikiPageRequest struct {
 	Title        string `json:"title"`
 	BodyMarkdown string `json:"bodyMarkdown"`
+}
+
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+const sessionCookieName = "arqboard_session"
+
+func login(store AuthStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
+			return
+		}
+
+		var payload loginRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Email) == "" || strings.TrimSpace(payload.Password) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_login", "email and password are required")
+			return
+		}
+
+		session, err := store.Login(r.Context(), db.LoginParams{
+			Email:    payload.Email,
+			Password: payload.Password,
+		})
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+
+		http.SetCookie(w, sessionCookie(r, session.Token, session.ExpiresAt))
+		writeJSON(w, http.StatusOK, session.User)
+	}
+}
+
+func currentUser(store AuthStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
+			return
+		}
+
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || strings.TrimSpace(cookie.Value) == "" {
+			writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+			return
+		}
+
+		user, err := store.CurrentUser(r.Context(), cookie.Value)
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, user)
+	}
+}
+
+func logout(store AuthStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, cookieErr := r.Cookie(sessionCookieName)
+		if cookieErr == nil && strings.TrimSpace(cookie.Value) != "" {
+			if store == nil {
+				writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
+				return
+			}
+			if err := store.Logout(r.Context(), cookie.Value); err != nil {
+				writeAuthError(w, err)
+				return
+			}
+		}
+
+		http.SetCookie(w, expiredSessionCookie(r))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func requireAuth(store AuthStore) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie(sessionCookieName)
+			if err != nil || strings.TrimSpace(cookie.Value) == "" {
+				writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+				return
+			}
+			if _, err := store.CurrentUser(r.Context(), cookie.Value); err != nil {
+				writeAuthError(w, err)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func defaultBoard(store BoardStore) http.HandlerFunc {
@@ -498,6 +610,48 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "request failed")
+	}
+}
+
+func writeAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, db.ErrInvalidCredentials), errors.Is(err, db.ErrUnauthenticated):
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "invalid credentials")
+	case errors.Is(err, db.ErrDatabaseUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "auth store is unavailable")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error", "request failed")
+	}
+}
+
+func sessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  expiresAt,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	}
+}
+
+func expiredSessionCookie(r *http.Request) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		Expires:  time.Unix(0, 0).UTC(),
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
 	}
 }
 
