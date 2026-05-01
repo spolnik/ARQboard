@@ -61,7 +61,7 @@ func TestMCPServerSearchesPlanningCards(t *testing.T) {
 		"title":       "Harden UUID schema request",
 		"description": "Every table has a UUID primary key and display names are not identity.",
 		"priority":    "high",
-		"due":         "Today",
+		"due":         "2026-05-01",
 	})
 
 	results := callTool[searchCardsOutput](t, ctx, session, "arqboard_search_cards", map[string]any{
@@ -112,7 +112,7 @@ func TestMCPServerCreatesAndUpdatesPlanningCards(t *testing.T) {
 		"description":   "Let an MCP client create and update ARQboard planning work.",
 		"priority":      "high",
 		"ownerInitials": "AI",
-		"due":           "Soon",
+		"due":           "2026-05-08",
 	})
 	if card.Title != "Plan with MCP" || card.Priority != "High" || card.Owner != "AI" {
 		t.Fatalf("created card = %#v, want updated planning card", card)
@@ -124,7 +124,7 @@ func TestMCPServerCreatesAndUpdatesPlanningCards(t *testing.T) {
 		"description":   "MCP clients can now manage boards and cards through the local server.",
 		"priority":      "urgent",
 		"ownerInitials": "OPS",
-		"due":           "Next",
+		"due":           "2026-05-15",
 	})
 	if updated.Title != "Plan ARQboard with MCP" || updated.Priority != "Urgent" || updated.Owner != "OPS" {
 		t.Fatalf("updated card = %#v, want persisted MCP update", updated)

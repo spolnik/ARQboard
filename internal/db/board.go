@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -44,6 +45,7 @@ type BoardColumn struct {
 type BoardCard struct {
 	ID          string `json:"id"`
 	ColumnID    string `json:"columnId"`
+	SprintID    string `json:"sprintId,omitempty"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Owner       string `json:"owner"`
@@ -177,7 +179,7 @@ var defaultCards = []seedCard{
 		description: "Map the session cookie lifecycle, expiry behavior, and local fallback for the first auth pass.",
 		owner:       "MS",
 		priority:    "high",
-		due:         "Apr 30",
+		due:         "2026-04-30",
 		position:    0,
 	},
 	{
@@ -186,7 +188,7 @@ var defaultCards = []seedCard{
 		description: "Keep migration examples tiny and readable so the test database can be recreated quickly.",
 		owner:       "JR",
 		priority:    "normal",
-		due:         "May 2",
+		due:         "2026-05-02",
 		position:    1,
 	},
 	{
@@ -195,7 +197,7 @@ var defaultCards = []seedCard{
 		description: "Lock the first JSON contracts for boards, columns, cards, and move operations before wiring the UI.",
 		owner:       "AK",
 		priority:    "urgent",
-		due:         "Today",
+		due:         "2026-05-01",
 		position:    0,
 	},
 	{
@@ -204,7 +206,7 @@ var defaultCards = []seedCard{
 		description: "Document the minimum local and container checks before a branch is pushed for review.",
 		owner:       "JL",
 		priority:    "normal",
-		due:         "May 3",
+		due:         "2026-05-03",
 		position:    0,
 	},
 }
@@ -560,10 +562,15 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 	if err != nil {
 		return BoardCard{}, err
 	}
+	due := defaultDueDate()
+	sprintID, err := ensureActiveSprintForBoard(ctx, tx, driver, workspaceID, boardID)
+	if err != nil {
+		return BoardCard{}, err
+	}
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO cards (id, board_id, column_id, title, description, priority, position, owner_initials, due_label)
-		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+		INSERT INTO cards (id, board_id, column_id, sprint_id, title, description, priority, position, owner_initials, due_at, due_label)
+		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '')
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
@@ -574,7 +581,8 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 		placeholder(driver, 7),
 		placeholder(driver, 8),
 		placeholder(driver, 9),
-	), cardID, boardID, columnID, title, "New card created locally and persisted in the board database.", "normal", position, ownerInitials(params.OwnerInitials), "Later")
+		placeholder(driver, 10),
+	), cardID, boardID, columnID, sprintID, title, "New card created locally and persisted in the board database.", "normal", position, ownerInitials(params.OwnerInitials), due)
 	if err != nil {
 		return BoardCard{}, err
 	}
@@ -633,9 +641,9 @@ func (store BoardStore) UpdateCard(ctx context.Context, params UpdateCardParams)
 	if err != nil {
 		return BoardCard{}, err
 	}
-	due := strings.TrimSpace(params.Due)
-	if due == "" {
-		due = "Later"
+	due, err := normalizeDueDate(params.Due)
+	if err != nil {
+		return BoardCard{}, err
 	}
 
 	sqlDB, driver, err := store.database()
@@ -660,7 +668,8 @@ func (store BoardStore) UpdateCard(ctx context.Context, params UpdateCardParams)
 			description = %s,
 			priority = %s,
 			owner_initials = %s,
-			due_label = %s,
+			due_at = %s,
+			due_label = '',
 			updated_at = %s
 		WHERE id = %s
 	`,
@@ -1024,7 +1033,7 @@ func ensureDefaultBoard(ctx context.Context, q sqlQueryer, driver Driver) (strin
 		return "", err
 	}
 	if cardCount == 0 {
-		if err := seedCards(ctx, q, driver, boardID, columnIDs); err != nil {
+		if err := seedCards(ctx, q, driver, workspaceID, boardID, columnIDs); err != nil {
 			return "", err
 		}
 	}
@@ -1210,7 +1219,12 @@ func availableColumnPosition(preferred int, occupied map[int]bool, next *int) in
 	return position
 }
 
-func seedCards(ctx context.Context, q sqlQueryer, driver Driver, boardID string, columnIDs map[string]string) error {
+func seedCards(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, boardID string, columnIDs map[string]string) error {
+	sprintID, err := ensureActiveSprintForBoard(ctx, q, driver, workspaceID, boardID)
+	if err != nil {
+		return err
+	}
+
 	for _, card := range defaultCards {
 		columnID := columnIDs[card.columnKey]
 		if columnID == "" {
@@ -1222,8 +1236,8 @@ func seedCards(ctx context.Context, q sqlQueryer, driver Driver, boardID string,
 			return err
 		}
 		_, err = q.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO cards (id, board_id, column_id, title, description, priority, position, owner_initials, due_label)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+			INSERT INTO cards (id, board_id, column_id, sprint_id, title, description, priority, position, owner_initials, due_at, due_label)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '')
 		`,
 			placeholder(driver, 1),
 			placeholder(driver, 2),
@@ -1234,7 +1248,8 @@ func seedCards(ctx context.Context, q sqlQueryer, driver Driver, boardID string,
 			placeholder(driver, 7),
 			placeholder(driver, 8),
 			placeholder(driver, 9),
-		), cardID, boardID, columnID, card.title, card.description, card.priority, card.position, card.owner, card.due)
+			placeholder(driver, 10),
+		), cardID, boardID, columnID, sprintID, card.title, card.description, card.priority, card.position, card.owner, card.due)
 		if err != nil {
 			return err
 		}
@@ -1276,7 +1291,14 @@ func loadBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string)
 	if err != nil {
 		return Board{}, err
 	}
-	cardsByColumn, err := loadCardsByColumn(ctx, q, driver, boardID)
+	activeSprintID, found, err := activeSprintIDForBoard(ctx, q, driver, boardID)
+	if err != nil {
+		return Board{}, err
+	}
+	cardsByColumn := make(map[string][]BoardCard)
+	if found {
+		cardsByColumn, err = loadCardsByColumn(ctx, q, driver, boardID, activeSprintID)
+	}
 	if err != nil {
 		return Board{}, err
 	}
@@ -1318,13 +1340,13 @@ func loadColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID strin
 	return columns, nil
 }
 
-func loadCardsByColumn(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (map[string][]BoardCard, error) {
+func loadCardsByColumn(ctx context.Context, q sqlQueryer, driver Driver, boardID string, sprintID string) (map[string][]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, column_id, title, description, owner_initials, priority, position, due_label
+		SELECT id, column_id, sprint_id, title, description, owner_initials, priority, position, %s
 		FROM cards
-		WHERE board_id = %s
+		WHERE board_id = %s AND sprint_id = %s
 		ORDER BY position, created_at, id
-	`, placeholder(driver, 1)), boardID)
+	`, cardDueText(driver), placeholder(driver, 1), placeholder(driver, 2)), boardID, sprintID)
 	if err != nil {
 		return nil, err
 	}
@@ -1458,10 +1480,10 @@ func loadCardActivity(ctx context.Context, q sqlQueryer, driver Driver, cardID s
 
 func loadCard(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (BoardCard, error) {
 	row := q.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, column_id, title, description, owner_initials, priority, position, due_label
+		SELECT id, column_id, sprint_id, title, description, owner_initials, priority, position, %s
 		FROM cards
 		WHERE id = %s
-	`, placeholder(driver, 1)), cardID)
+	`, cardDueText(driver), placeholder(driver, 1)), cardID)
 
 	card, err := scanCard(row)
 	if err != nil {
@@ -1535,9 +1557,11 @@ type cardScanner interface {
 func scanCard(scanner cardScanner) (BoardCard, error) {
 	var card BoardCard
 	var priority string
-	if err := scanner.Scan(&card.ID, &card.ColumnID, &card.Title, &card.Description, &card.Owner, &priority, &card.Position, &card.Due); err != nil {
+	var sprintID sql.NullString
+	if err := scanner.Scan(&card.ID, &card.ColumnID, &sprintID, &card.Title, &card.Description, &card.Owner, &priority, &card.Position, &card.Due); err != nil {
 		return BoardCard{}, err
 	}
+	card.SprintID = sprintID.String
 	card.Owner = ownerInitials(card.Owner)
 	card.Priority = displayPriority(priority)
 	return card, nil
@@ -1701,6 +1725,8 @@ func activitySummary(eventType string) string {
 		return "Card moved"
 	case "card.commented":
 		return "Comment added"
+	case "card.sprint_assigned":
+		return "Sprint assignment updated"
 	default:
 		return "Activity recorded"
 	}
@@ -1711,6 +1737,29 @@ func currentTimestamp(driver Driver) string {
 		return "now()"
 	}
 	return "datetime('now')"
+}
+
+func cardDueText(driver Driver) string {
+	if driver == DriverPostgres {
+		return "COALESCE(due_at::date::text, NULLIF(due_label, ''), '')"
+	}
+	return "COALESCE(substr(due_at, 1, 10), NULLIF(due_label, ''), '')"
+}
+
+func normalizeDueDate(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%w: due date is required", ErrValidation)
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return "", fmt.Errorf("%w: due date must use YYYY-MM-DD", ErrValidation)
+	}
+	return parsed.Format("2006-01-02"), nil
+}
+
+func defaultDueDate() string {
+	return time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02")
 }
 
 func timeText(driver Driver, column string) string {

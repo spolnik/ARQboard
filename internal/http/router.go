@@ -48,6 +48,11 @@ type BoardStore interface {
 	GetWikiPage(context.Context, string) (db.WikiPage, error)
 	CreateWikiPage(context.Context, db.CreateWikiPageParams) (db.WikiPage, error)
 	UpdateWikiPage(context.Context, db.UpdateWikiPageParams) (db.WikiPage, error)
+	GetPlanningDashboard(context.Context, string) (db.PlanningDashboard, error)
+	CreateSprint(context.Context, db.CreateSprintParams) (db.Sprint, error)
+	StartSprint(context.Context, string) (db.Sprint, error)
+	CompleteSprint(context.Context, db.CompleteSprintParams) (db.Sprint, error)
+	AssignCardToSprint(context.Context, db.AssignCardToSprintParams) (db.BoardCard, error)
 }
 
 type AuthStore interface {
@@ -101,10 +106,15 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/boards/default", defaultBoard(opts.BoardStore))
 			r.Get("/boards/{boardID}", boardByID(opts.BoardStore))
 			r.Post("/boards/{boardID}/columns", createColumn(opts.BoardStore))
+			r.Get("/planning", planningDashboard(opts.BoardStore))
+			r.Post("/sprints", createSprint(opts.BoardStore))
+			r.Post("/sprints/{sprintID}/start", startSprint(opts.BoardStore))
+			r.Post("/sprints/{sprintID}/complete", completeSprint(opts.BoardStore))
 			r.Patch("/columns/{columnID}", updateColumn(opts.BoardStore))
 			r.Post("/cards", createCard(opts.BoardStore))
 			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
 			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
+			r.Patch("/cards/{cardID}/sprint", assignCardToSprint(opts.BoardStore))
 			r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
 			r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
 			r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore))
@@ -158,6 +168,27 @@ type updateCardRequest struct {
 type moveCardRequest struct {
 	ColumnID string `json:"columnId"`
 	Position int    `json:"position"`
+}
+
+type sprintRequest struct {
+	BoardID  string `json:"boardId"`
+	Name     string `json:"name"`
+	Goal     string `json:"goal"`
+	StartsOn string `json:"startsOn"`
+	EndsOn   string `json:"endsOn"`
+}
+
+type completeSprintRequest struct {
+	Rollover []sprintRolloverRequest `json:"rollover"`
+}
+
+type sprintRolloverRequest struct {
+	CardID   string `json:"cardId"`
+	SprintID string `json:"sprintId"`
+}
+
+type assignSprintRequest struct {
+	SprintID string `json:"sprintId"`
 }
 
 type createCardCommentRequest struct {
@@ -434,6 +465,108 @@ func createColumn(store BoardStore) http.HandlerFunc {
 	}
 }
 
+func planningDashboard(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		dashboard, err := store.GetPlanningDashboard(r.Context(), r.URL.Query().Get("boardId"))
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, dashboard)
+	}
+}
+
+func createSprint(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload sprintRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Name) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_sprint", "name is required")
+			return
+		}
+
+		sprint, err := store.CreateSprint(r.Context(), db.CreateSprintParams{
+			BoardID:  payload.BoardID,
+			Name:     payload.Name,
+			Goal:     payload.Goal,
+			StartsOn: payload.StartsOn,
+			EndsOn:   payload.EndsOn,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, sprint)
+	}
+}
+
+func startSprint(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		sprint, err := store.StartSprint(r.Context(), chi.URLParam(r, "sprintID"))
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, sprint)
+	}
+}
+
+func completeSprint(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload completeSprintRequest
+		if r.ContentLength != 0 {
+			if err := decodeJSON(w, r, &payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+				return
+			}
+		}
+		rollover := make([]db.SprintRolloverDecision, 0, len(payload.Rollover))
+		for _, decision := range payload.Rollover {
+			rollover = append(rollover, db.SprintRolloverDecision{
+				CardID:   decision.CardID,
+				SprintID: decision.SprintID,
+			})
+		}
+
+		sprint, err := store.CompleteSprint(r.Context(), db.CompleteSprintParams{
+			SprintID: chi.URLParam(r, "sprintID"),
+			Rollover: rollover,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, sprint)
+	}
+}
+
 func updateColumn(store BoardStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -536,6 +669,32 @@ func updateCard(store BoardStore) http.HandlerFunc {
 			Priority:      payload.Priority,
 			OwnerInitials: payload.OwnerInitials,
 			Due:           payload.Due,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, card)
+	}
+}
+
+func assignCardToSprint(store BoardStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload assignSprintRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+
+		card, err := store.AssignCardToSprint(r.Context(), db.AssignCardToSprintParams{
+			CardID:   chi.URLParam(r, "cardID"),
+			SprintID: payload.SprintID,
 		})
 		if err != nil {
 			writeStoreError(w, r, err)

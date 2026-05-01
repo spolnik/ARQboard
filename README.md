@@ -14,7 +14,8 @@ This repo now contains the Go service, database-backed board API, and React web 
 - `serve` applies embedded migrations before it starts accepting traffic; `migrate` remains available as an explicit pre-flight command.
 - CLI-created admin users can sign in through DB-backed HTTP-only sessions.
 - A seeded default workspace board with persisted columns, cards, card creation, and card movement.
-- Authenticated JSON API endpoints for the default board, card creation, card moves, card detail, comments, and wiki pages.
+- Sprint planning with named board-scoped sprints, backlog assignment, one active sprint per board, and explicit close-sprint rollover choices.
+- Authenticated JSON API endpoints for boards, card creation, card moves, sprint planning, card detail, comments, and wiki pages.
 - Local stdio MCP server for board, card, and wiki planning tools.
 - React + Vite + TypeScript + Tailwind frontend under `web/`.
 - Drag-and-drop card movement through `dnd-kit`, using the whole card as the drag surface.

@@ -3,11 +3,13 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCorners,
+  pointerWithin,
+  rectIntersection,
   useDroppable,
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import type { DragEndEvent } from '@dnd-kit/core';
+import type { CollisionDetection, DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
@@ -45,7 +47,7 @@ import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, MouseEvent, ReactNode } from 'react';
 
-type View = 'boards' | 'wiki' | 'settings' | 'card';
+type View = 'boards' | 'planning' | 'wiki' | 'settings' | 'card';
 
 type AuthState = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -73,6 +75,7 @@ type WorkspaceMember = {
 type Card = {
   id: string;
   columnId: string;
+  sprintId?: string;
   title: string;
   owner: string;
   priority: Priority;
@@ -153,6 +156,39 @@ type MemberForm = {
   role: WorkspaceRole;
 };
 
+type Sprint = {
+  id: string;
+  workspaceId: string;
+  boardId: string;
+  name: string;
+  goal: string;
+  status: 'planned' | 'active' | 'completed';
+  startsOn?: string;
+  endsOn?: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+type SprintPlan = {
+  sprint: Sprint;
+  cards: Card[];
+};
+
+type PlanningDashboard = {
+  boardId: string;
+  backlog: Card[];
+  activeSprint?: SprintPlan | null;
+  plannedSprints: SprintPlan[];
+  completedSprints: SprintPlan[];
+};
+
+type SprintForm = {
+  name: string;
+  goal: string;
+  startsOn: string;
+  endsOn: string;
+};
+
 type WikiTreeNode = {
   key: string;
   label: string;
@@ -161,6 +197,21 @@ type WikiTreeNode = {
 };
 
 const workspaceRoleOptions: WorkspaceRole[] = ['owner', 'admin', 'member', 'viewer'];
+const emptyPlanningDashboard: PlanningDashboard = { boardId: '', backlog: [], plannedSprints: [], completedSprints: [] };
+const boardCollisionDetection: CollisionDetection = (args) => {
+  const withoutActive = (collisions: ReturnType<CollisionDetection>) => collisions.filter((collision) => collision.id !== args.active.id);
+  const pointerCollisions = withoutActive(pointerWithin(args));
+  if (pointerCollisions.length > 0) {
+    return pointerCollisions;
+  }
+
+  const intersectingCollisions = withoutActive(rectIntersection(args));
+  if (intersectingCollisions.length > 0) {
+    return intersectingCollisions;
+  }
+
+  return withoutActive(closestCorners(args));
+};
 
 function App() {
   const [authState, setAuthState] = useState<AuthState>('loading');
@@ -207,6 +258,12 @@ function App() {
   });
   const [memberMessage, setMemberMessage] = useState('');
   const [isSavingMember, setIsSavingMember] = useState(false);
+  const [planningDashboard, setPlanningDashboard] = useState<PlanningDashboard | null>(null);
+  const [sprintForm, setSprintForm] = useState<SprintForm>({ name: '', goal: '', startsOn: '', endsOn: '' });
+  const [cardSprintDrafts, setCardSprintDrafts] = useState<Record<string, string>>({});
+  const [isCompletingSprint, setIsCompletingSprint] = useState(false);
+  const [sprintCompletionTargets, setSprintCompletionTargets] = useState<Record<string, string>>({});
+  const [planningMessage, setPlanningMessage] = useState('');
   const [newComment, setNewComment] = useState('');
   const [error, setError] = useState('');
 
@@ -232,6 +289,12 @@ function App() {
     setMemberForm({ email: '', displayName: '', password: '', role: 'member' });
     setMemberMessage('');
     setIsSavingMember(false);
+    setPlanningDashboard(null);
+    setSprintForm({ name: '', goal: '', startsOn: '', endsOn: '' });
+    setCardSprintDrafts({});
+    setIsCompletingSprint(false);
+    setSprintCompletionTargets({});
+    setPlanningMessage('');
     setNewComment('');
     setError('');
   }, []);
@@ -433,16 +496,55 @@ function App() {
     };
   }, [activeView, authState, currentUser?.isAdmin]);
 
+  useEffect(() => {
+    if (authState !== 'authenticated' || activeView !== 'planning' || !selectedBoardId) {
+      return;
+    }
+
+    let cancelled = false;
+    async function loadPlanning() {
+      try {
+        const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedBoardId)));
+        if (!cancelled) {
+          setPlanningDashboard(dashboard);
+          setIsCompletingSprint(false);
+          setSprintCompletionTargets({});
+          setPlanningMessage('');
+        }
+      } catch {
+        if (!cancelled) {
+          setPlanningDashboard(emptyPlanningDashboard);
+          setPlanningMessage('Could not load planning dashboard.');
+        }
+      }
+    }
+
+    loadPlanning();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, authState, selectedBoardId]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
   const boardSelectedCard = selectedCardId ? allCards.find((card) => card.id === selectedCardId) : undefined;
   const selectedCard = selectedCardId && cardDetail?.card.id === selectedCardId ? cardDetail.card : boardSelectedCard;
   const boardFullScreen = activeView === 'boards' && isBoardFullScreen;
-  const rightRailVisible = activeView === 'boards' && !boardFullScreen && !isRightRailCollapsed;
-  const layoutGridColumns = rightRailVisible
+  const rightRailAttached = activeView === 'boards' && !boardFullScreen;
+  const rightRailVisible = rightRailAttached && !isRightRailCollapsed;
+  const planning = planningDashboard ?? emptyPlanningDashboard;
+  const sprintOptions = [
+    ...planning.plannedSprints.map((plan) => plan.sprint),
+    ...(planning.activeSprint ? [planning.activeSprint.sprint] : []),
+  ];
+  const layoutGridColumns = rightRailAttached
     ? isNavCollapsed
-      ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)_20rem]'
-      : 'lg:grid-cols-[14rem_minmax(0,1fr)_20rem]'
+      ? isRightRailCollapsed
+        ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)_3.5rem]'
+        : 'lg:grid-cols-[4.5rem_minmax(0,1fr)_20rem]'
+      : isRightRailCollapsed
+        ? 'lg:grid-cols-[14rem_minmax(0,1fr)_3.5rem]'
+        : 'lg:grid-cols-[14rem_minmax(0,1fr)_20rem]'
     : isNavCollapsed
       ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)]'
       : 'lg:grid-cols-[14rem_minmax(0,1fr)]';
@@ -694,7 +796,8 @@ function App() {
       ownerInitials: ownerInitials(cardForm.ownerInitials),
       due: cardForm.due.trim(),
     };
-    if (!payload.title) {
+    if (!payload.title || !payload.due) {
+      setError(payload.title ? 'Due date is required.' : 'Card title is required.');
       return;
     }
 
@@ -840,6 +943,113 @@ function App() {
     }
   }
 
+  async function submitSprint(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedBoardId) {
+      setPlanningMessage('Select a board before creating a sprint.');
+      return;
+    }
+
+    const payload = {
+      boardId: selectedBoardId,
+      name: sprintForm.name.trim(),
+      goal: sprintForm.goal.trim(),
+      startsOn: sprintForm.startsOn.trim(),
+      endsOn: sprintForm.endsOn.trim(),
+    };
+    if (!payload.name) {
+      setPlanningMessage('Sprint name is required.');
+      return;
+    }
+
+    try {
+      const sprint = await requestJSON<Sprint>('/api/sprints', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setPlanningDashboard((current) => addSprintToDashboard(current ?? emptyPlanningDashboard, sprint));
+      setSprintForm({ name: '', goal: '', startsOn: '', endsOn: '' });
+      setPlanningMessage('Sprint created.');
+    } catch {
+      setPlanningMessage('Could not create sprint.');
+    }
+  }
+
+  async function assignCardToSelectedSprint(card: Card) {
+    const sprintId = cardSprintDrafts[card.id] ?? sprintOptions[0]?.id ?? '';
+    if (!sprintId) {
+      setPlanningMessage('Create a sprint before assigning backlog cards.');
+      return;
+    }
+
+    try {
+      const assignedCard = await requestJSON<Card>(`/api/cards/${card.id}/sprint`, {
+        method: 'PATCH',
+        body: JSON.stringify({ sprintId }),
+      });
+      setPlanningDashboard((current) => assignCardInDashboard(current ?? emptyPlanningDashboard, assignedCard));
+      setBoard((current) => replaceCardInBoard(current, assignedCard));
+      setCardDetail((current) => (current && current.card.id === assignedCard.id ? { ...current, card: assignedCard } : current));
+      setCardSprintDrafts((current) => ({ ...current, [card.id]: sprintId }));
+      setPlanningMessage('Card assigned to sprint.');
+    } catch {
+      setPlanningMessage('Could not assign card to sprint.');
+    }
+  }
+
+  async function startPlanningSprint(sprint: Sprint) {
+    try {
+      const startedSprint = await requestJSON<Sprint>(`/api/sprints/${sprint.id}/start`, { method: 'POST' });
+      setPlanningDashboard((current) => startSprintInDashboard(current ?? emptyPlanningDashboard, startedSprint));
+      setBoard(null);
+      setIsCompletingSprint(false);
+      setSprintCompletionTargets({});
+      setPlanningMessage('Sprint started.');
+    } catch {
+      setPlanningMessage('Could not start sprint.');
+    }
+  }
+
+  function beginPlanningSprintCompletion(sprint: Sprint) {
+    const activeCards = planning.activeSprint?.sprint.id === sprint.id ? planning.activeSprint.cards : [];
+    setSprintCompletionTargets(Object.fromEntries(activeCards.map((card) => [card.id, ''])));
+    setIsCompletingSprint(true);
+    setPlanningMessage('');
+  }
+
+  async function completePlanningSprint(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!planning.activeSprint) {
+      setPlanningMessage('No active sprint to complete.');
+      return;
+    }
+    if (!selectedBoardId) {
+      setPlanningMessage('Select a board before completing a sprint.');
+      return;
+    }
+
+    const sprint = planning.activeSprint.sprint;
+    const rollover = planning.activeSprint.cards.map((card) => ({
+      cardId: card.id,
+      sprintId: sprintCompletionTargets[card.id] ?? '',
+    }));
+
+    try {
+      await requestJSON<Sprint>(`/api/sprints/${sprint.id}/complete`, {
+        method: 'POST',
+        body: JSON.stringify({ rollover }),
+      });
+      const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedBoardId)));
+      setPlanningDashboard(dashboard);
+      setBoard(null);
+      setIsCompletingSprint(false);
+      setSprintCompletionTargets({});
+      setPlanningMessage('Sprint completed.');
+    } catch {
+      setPlanningMessage('Could not complete sprint.');
+    }
+  }
+
   async function handleDragEnd(event: DragEndEvent) {
     if (!board || !event.over) {
       return;
@@ -850,7 +1060,12 @@ function App() {
       return;
     }
 
-    const target = resolveMoveTarget(board, String(event.over.id));
+    const target = resolveDragMoveTarget(
+      board,
+      activeCard.id,
+      event.over ? String(event.over.id) : '',
+      event.collisions?.map((collision) => String(collision.id)) ?? [],
+    );
     if (!target) {
       return;
     }
@@ -938,14 +1153,6 @@ function App() {
             <span className="max-w-36 truncate">{currentUser?.displayName || currentUser?.email}</span>
           </div>
           <button
-            className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            type="button"
-            onClick={() => setIsCreateBoardOpen(true)}
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            New Board
-          </button>
-          <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
             type="button"
             onClick={() => setIsCreateOpen(true)}
@@ -1005,6 +1212,13 @@ function App() {
               onClick={() => showView('boards')}
             />
             <NavButton
+              active={activeView === 'planning'}
+              icon={<CalendarDays className="h-4 w-4" aria-hidden="true" />}
+              label="Planning"
+              collapsed={isNavCollapsed}
+              onClick={() => showView('planning')}
+            />
+            <NavButton
               active={activeView === 'wiki'}
               icon={<BookOpen className="h-4 w-4" aria-hidden="true" />}
               label="Wiki"
@@ -1055,28 +1269,6 @@ function App() {
                   <button
                     className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
                     type="button"
-                    aria-label="Open add column"
-                    onClick={() => setIsCreateColumnOpen(true)}
-                    disabled={!board}
-                  >
-                    <Plus className="h-4 w-4" aria-hidden="true" />
-                    Add Column
-                  </button>
-                  <button
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                    type="button"
-                    aria-label={isRightRailCollapsed ? 'Expand wiki and detail panel' : 'Collapse wiki and detail panel'}
-                    aria-expanded={!isRightRailCollapsed}
-                    onClick={() => setIsRightRailCollapsed((current) => !current)}
-                    disabled={boardFullScreen}
-                    title={isRightRailCollapsed ? 'Expand wiki and detail panel' : 'Collapse wiki and detail panel'}
-                  >
-                    {isRightRailCollapsed ? <PanelRightOpen className="h-4 w-4" aria-hidden="true" /> : <PanelRightClose className="h-4 w-4" aria-hidden="true" />}
-                    {isRightRailCollapsed ? 'Show panel' : 'Hide panel'}
-                  </button>
-                  <button
-                    className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                    type="button"
                     aria-label={boardFullScreen ? 'Exit full screen board' : 'Expand kanban board'}
                     aria-pressed={boardFullScreen}
                     onClick={() => setIsBoardFullScreen((current) => !current)}
@@ -1100,7 +1292,7 @@ function App() {
                   Loading board...
                 </p>
               ) : (
-                <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
+                <DndContext sensors={sensors} collisionDetection={boardCollisionDetection} onDragEnd={handleDragEnd}>
                   <div className={boardFullScreen ? 'h-[calc(100vh-7.5rem)] overflow-auto pb-2' : 'overflow-x-auto pb-2'}>
                     <section
                       className={`grid gap-3 ${boardFullScreen ? 'min-h-full min-w-[72rem]' : 'min-w-[64rem]'}`}
@@ -1114,7 +1306,6 @@ function App() {
                           column={column}
                           selectedCardId={selectedCard?.id ?? ''}
                           onSelectCard={selectCard}
-                          onRenameColumn={startRenamingColumn}
                         />
                       ))}
                     </section>
@@ -1123,8 +1314,36 @@ function App() {
               )}
             </main>
 
-            {rightRailVisible ? (
-            <div className="border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0">
+            {rightRailAttached ? (
+              isRightRailCollapsed ? (
+                <aside className="border-t border-slate-200 bg-white p-2 lg:border-l lg:border-t-0" aria-label="Collapsed board side panel">
+                  <button
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
+                    type="button"
+                    aria-label="Expand wiki and detail panel"
+                    aria-expanded={false}
+                    onClick={() => setIsRightRailCollapsed(false)}
+                    title="Expand wiki and detail panel"
+                  >
+                    <PanelRightOpen className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </aside>
+              ) : (
+            <aside className="border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0" aria-label="Board side panel">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Panel</h2>
+                <button
+                  className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  type="button"
+                  aria-label="Collapse wiki and detail panel"
+                  aria-expanded={true}
+                  onClick={() => setIsRightRailCollapsed(true)}
+                  title="Collapse wiki and detail panel"
+                >
+                  <PanelRightClose className="h-3.5 w-3.5" aria-hidden="true" />
+                  Hide
+                </button>
+              </div>
               {selectedCard ? (
                 <aside className="mb-5" aria-label="Card detail">
                   <div className="mb-2 flex items-center justify-between">
@@ -1210,11 +1429,12 @@ function App() {
                       </div>
                       <div>
                         <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-due">
-                          Due label
+                          Due date
                         </label>
                         <input
                           id="edit-card-due"
                           name="due"
+                          type="date"
                           className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
                           value={cardForm.due}
                           onChange={(event) => setCardForm((current) => ({ ...current, due: event.target.value }))}
@@ -1244,7 +1464,9 @@ function App() {
                       <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-slate-600">
                         <p>Owner {selectedCard.owner}</p>
                         <p>Priority {selectedCard.priority}</p>
-                        <p>Due {selectedCard.due}</p>
+                        <p>
+                          <DueBadge due={selectedCard.due} prefix />
+                        </p>
                       </div>
                     </>
                   )}
@@ -1318,7 +1540,8 @@ function App() {
                 </div>
                 <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
               </aside>
-            </div>
+            </aside>
+              )
             ) : null}
           </>
         ) : (
@@ -1340,14 +1563,120 @@ function App() {
                 {selectedCard ? (
                   <div className="space-y-4">
                     <div className="rounded-md border border-slate-200 bg-white p-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Card detail</p>
-                      <h1 className="mt-1 text-2xl font-semibold tracking-normal">{selectedCard.title}</h1>
-                      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">{selectedCard.description}</p>
-                      <div className="mt-4 grid gap-2 text-sm text-slate-600 sm:grid-cols-3">
-                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Owner {selectedCard.owner}</p>
-                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Priority {selectedCard.priority}</p>
-                        <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Due {selectedCard.due}</p>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Card detail</p>
+                          <h1 className="mt-1 text-2xl font-semibold tracking-normal">{selectedCard.title}</h1>
+                        </div>
+                        <button
+                          className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          type="button"
+                          onClick={startEditingCard}
+                        >
+                          <Pencil className="h-4 w-4" aria-hidden="true" />
+                          Edit Card
+                        </button>
                       </div>
+                      {isEditingCard ? (
+                        <form className="mt-4 space-y-3 border-t border-slate-200 pt-4" onSubmit={updateSelectedCard}>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-title">
+                              Card title
+                            </label>
+                            <input
+                              id="page-card-title"
+                              name="title"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={cardForm.title}
+                              onChange={(event) => setCardForm((current) => ({ ...current, title: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-description">
+                              Description
+                            </label>
+                            <textarea
+                              id="page-card-description"
+                              name="description"
+                              className="min-h-28 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                              value={cardForm.description}
+                              onChange={(event) => setCardForm((current) => ({ ...current, description: event.target.value }))}
+                            />
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-3">
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-priority">
+                                Priority
+                              </label>
+                              <select
+                                id="page-card-priority"
+                                name="priority"
+                                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                                value={cardForm.priority}
+                                onChange={(event) => setCardForm((current) => ({ ...current, priority: event.target.value }))}
+                              >
+                                <option value="low">Low</option>
+                                <option value="normal">Normal</option>
+                                <option value="high">High</option>
+                                <option value="urgent">Urgent</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-owner">
+                                Owner initials
+                              </label>
+                              <input
+                                id="page-card-owner"
+                                name="owner"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm uppercase outline-none focus:border-slate-950"
+                                maxLength={3}
+                                value={cardForm.ownerInitials}
+                                onChange={(event) => setCardForm((current) => ({ ...current, ownerInitials: event.target.value }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-due">
+                                Due date
+                              </label>
+                              <input
+                                id="page-card-due"
+                                name="due"
+                                type="date"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                value={cardForm.due}
+                                onChange={(event) => setCardForm((current) => ({ ...current, due: event.target.value }))}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                              type="button"
+                              onClick={() => setIsEditingCard(false)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                              type="submit"
+                            >
+                              <Save className="h-4 w-4" aria-hidden="true" />
+                              Save Card
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <>
+                          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">{selectedCard.description}</p>
+                          <div className="mt-4 grid gap-2 text-sm text-slate-600 sm:grid-cols-3">
+                            <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Owner {selectedCard.owner}</p>
+                            <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Priority {selectedCard.priority}</p>
+                            <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                              <DueBadge due={selectedCard.due} prefix />
+                            </p>
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     <div className="grid gap-4 lg:grid-cols-2">
@@ -1391,6 +1720,221 @@ function App() {
                     Select a card from the board to open its full detail page.
                   </article>
                 )}
+              </section>
+            ) : activeView === 'planning' ? (
+              <section className="max-w-7xl" aria-label="Planning workspace">
+                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Sprint planning</p>
+                    <h1 className="text-2xl font-semibold tracking-normal">Planning dashboard</h1>
+                  </div>
+                  <p className="text-sm text-slate-500">
+                    {planning.backlog.length} backlog {planning.backlog.length === 1 ? 'card' : 'cards'}
+                  </p>
+                </div>
+
+                {planningMessage ? (
+                  <p className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">{planningMessage}</p>
+                ) : null}
+
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+                  <div className="space-y-4">
+                    <section aria-label="Active sprint" className="rounded-md border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h2 className="text-sm font-semibold">Active sprint</h2>
+                        <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                          {planning.activeSprint ? 'Running' : 'No active sprint'}
+                        </span>
+                      </div>
+                      {planning.activeSprint ? (
+                        <>
+                          <SprintPlanBlock plan={planning.activeSprint} action="complete" onComplete={beginPlanningSprintCompletion} />
+                          {isCompletingSprint ? (
+                            <form className="mt-3 space-y-3 rounded-md border border-emerald-100 bg-emerald-50 p-3" onSubmit={completePlanningSprint}>
+                              <div>
+                                <h3 className="text-sm font-semibold text-emerald-950">Complete sprint</h3>
+                                <p className="mt-1 text-sm text-emerald-800">Choose which unfinished cards move forward. Others return to backlog.</p>
+                              </div>
+                              {planning.activeSprint.cards.length ? (
+                                <div className="space-y-2">
+                                  {planning.activeSprint.cards.map((card) => (
+                                    <label key={card.id} className="block rounded-md border border-emerald-100 bg-white p-2 text-sm">
+                                      <span className="block font-medium text-slate-800">{card.title}</span>
+                                      <select
+                                        className="mt-2 h-9 w-full rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-950"
+                                        aria-label={`Completion target for ${card.title}`}
+                                        value={sprintCompletionTargets[card.id] ?? ''}
+                                        onChange={(event) =>
+                                          setSprintCompletionTargets((current) => ({ ...current, [card.id]: event.target.value }))
+                                        }
+                                      >
+                                        <option value="">Backlog</option>
+                                        {planning.plannedSprints.map((plan) => (
+                                          <option key={plan.sprint.id} value={plan.sprint.id}>
+                                            {plan.sprint.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="rounded-md border border-emerald-100 bg-white px-3 py-3 text-sm text-slate-500">
+                                  This sprint has no cards assigned.
+                                </p>
+                              )}
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800"
+                                  type="submit"
+                                >
+                                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                                  Complete sprint
+                                </button>
+                                <button
+                                  className="inline-flex h-9 items-center justify-center rounded-md border border-emerald-200 bg-white px-3 text-sm font-medium text-emerald-800 hover:bg-emerald-100"
+                                  type="button"
+                                  onClick={() => {
+                                    setIsCompletingSprint(false);
+                                    setSprintCompletionTargets({});
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </form>
+                          ) : null}
+                        </>
+                      ) : (
+                        <p className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+                          Start a planned sprint when the team is ready to commit work.
+                        </p>
+                      )}
+                    </section>
+
+                    <section aria-label="Backlog" className="rounded-md border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h2 className="text-sm font-semibold">Backlog</h2>
+                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.backlog.length}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {planning.backlog.length ? (
+                          planning.backlog.map((card) => (
+                            <PlanningCardRow
+                              key={card.id}
+                              card={card}
+                              sprintOptions={sprintOptions}
+                              sprintId={cardSprintDrafts[card.id] ?? sprintOptions[0]?.id ?? ''}
+                              onSprintChange={(sprintId) => setCardSprintDrafts((current) => ({ ...current, [card.id]: sprintId }))}
+                              onAssign={() => assignCardToSelectedSprint(card)}
+                            />
+                          ))
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+                            Backlog is clear. New unassigned board cards will appear here.
+                          </p>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+
+                  <aside className="space-y-4" aria-label="Sprint controls">
+                    <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
+                      <h2 className="text-sm font-semibold">Create sprint</h2>
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
+                            Sprint name
+                          </label>
+                          <input
+                            id="sprint-name"
+                            className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                            value={sprintForm.name}
+                            onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-goal">
+                            Sprint goal
+                          </label>
+                          <textarea
+                            id="sprint-goal"
+                            className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                            value={sprintForm.goal}
+                            onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
+                              Starts on
+                            </label>
+                            <input
+                              id="sprint-starts-on"
+                              type="date"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={sprintForm.startsOn}
+                              onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
+                              Ends on
+                            </label>
+                            <input
+                              id="sprint-ends-on"
+                              type="date"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={sprintForm.endsOn}
+                              onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <button
+                          className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                          type="submit"
+                        >
+                          <Plus className="h-4 w-4" aria-hidden="true" />
+                          Create sprint
+                        </button>
+                      </div>
+                    </form>
+
+                    <section aria-label="Planned sprints" className="rounded-md border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h2 className="text-sm font-semibold">Planned sprints</h2>
+                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.plannedSprints.length}</span>
+                      </div>
+                      <div className="space-y-3">
+                        {planning.plannedSprints.length ? (
+                          planning.plannedSprints.map((plan) => (
+                            <SprintPlanBlock key={plan.sprint.id} plan={plan} action="start" onStart={startPlanningSprint} />
+                          ))
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-5 text-center text-sm text-slate-500">
+                            No planned sprints yet.
+                          </p>
+                        )}
+                      </div>
+                    </section>
+
+                    <section aria-label="Completed sprints" className="rounded-md border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h2 className="text-sm font-semibold">Completed sprints</h2>
+                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.completedSprints.length}</span>
+                      </div>
+                      <div className="space-y-3">
+                        {planning.completedSprints.length ? (
+                          planning.completedSprints.map((plan) => <SprintPlanBlock key={plan.sprint.id} plan={plan} action="none" />)
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-5 text-center text-sm text-slate-500">
+                            Completed sprints will collect here.
+                          </p>
+                        )}
+                      </div>
+                    </section>
+                  </aside>
+                </div>
               </section>
             ) : activeView === 'wiki' ? (
               <section className="max-w-5xl">
@@ -1476,6 +2020,95 @@ function App() {
                       Board cards now persist in the configured database. Local development uses SQLite unless
                       `DATABASE_URL` points at PostgreSQL.
                     </p>
+                  </div>
+
+                  <div className="rounded-md border border-slate-200 bg-white p-4">
+                    <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h2 className="text-sm font-semibold">Board administration</h2>
+                        <p className="text-sm text-slate-500">Boards, columns, and workflow states.</p>
+                      </div>
+                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boards.length} boards</p>
+                    </div>
+
+                    {currentUser?.isAdmin ? (
+                      <div className="space-y-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                          <div className="min-w-56">
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="settings-board-selector">
+                              Board to configure
+                            </label>
+                            <select
+                              id="settings-board-selector"
+                              className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                              value={selectedBoardId}
+                              onChange={(event) => selectBoard(event.target.value)}
+                            >
+                              {boards.length > 0 ? (
+                                boards.map((summary) => (
+                                  <option key={summary.id} value={summary.id}>
+                                    {summary.name}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="">No boards</option>
+                              )}
+                            </select>
+                          </div>
+                          <button
+                            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                            type="button"
+                            onClick={() => setIsCreateBoardOpen(true)}
+                          >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            New Board
+                          </button>
+                          <button
+                            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                            type="button"
+                            aria-label="Open add column"
+                            onClick={() => setIsCreateColumnOpen(true)}
+                            disabled={!board}
+                          >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            Add Column
+                          </button>
+                        </div>
+
+                        <div className="rounded-md border border-slate-200">
+                          <div className="border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">
+                            Columns
+                          </div>
+                          {board?.columns.length ? (
+                            <div className="divide-y divide-slate-100">
+                              {board.columns.map((column) => (
+                                <div key={column.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-medium text-slate-900">{column.title}</p>
+                                    <p className="text-xs text-slate-500">{column.cards.length} cards</p>
+                                  </div>
+                                  <button
+                                    className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                    type="button"
+                                    aria-label={`Rename ${column.title}`}
+                                    onClick={() => startRenamingColumn(column)}
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                                    Rename
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="px-3 py-6 text-center text-sm text-slate-500">No columns.</p>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                        Admin access is required to manage board structure.
+                      </p>
+                    )}
                   </div>
 
                   <div className="rounded-md border border-slate-200 bg-white p-4">
@@ -1913,12 +2546,10 @@ function KanbanColumn({
   column,
   selectedCardId,
   onSelectCard,
-  onRenameColumn,
 }: {
   column: Column;
   selectedCardId: string;
   onSelectCard: (cardId: string) => void;
-  onRenameColumn: (column: Column) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: column.id,
@@ -1937,15 +2568,6 @@ function KanbanColumn({
           <h2 className="text-sm font-semibold">{column.title}</h2>
           <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">{column.cards.length}</span>
         </div>
-        <button
-          className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100"
-          type="button"
-          aria-label={`Rename ${column.title}`}
-          title={`Rename ${column.title}`}
-          onClick={() => onRenameColumn(column)}
-        >
-          <Pencil className="mx-auto h-4 w-4" aria-hidden="true" />
-        </button>
       </div>
       <SortableContext items={column.cards.map((card) => card.id)} strategy={verticalListSortingStrategy}>
         <div className="space-y-2 p-2">
@@ -2014,12 +2636,165 @@ function SortableCard({
           <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
             <PriorityIcon priority={card.priority} />
           </span>
-          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5" aria-label={`Due ${card.due}`}>
-            <CalendarDays className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-            <span>{card.due}</span>
-          </span>
+          <DueBadge due={card.due} />
         </span>
       </button>
+    </article>
+  );
+}
+
+function DueBadge({ due, prefix = false }: { due: string; prefix?: boolean }) {
+  const status = dueStatus(due);
+
+  return (
+    <span
+      className={`inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs ${status.className}`}
+      aria-label={`Due ${due} ${status.label}`}
+      title={`Due ${due} - ${status.label}`}
+    >
+      <CalendarDays className="h-3.5 w-3.5" aria-hidden="true" />
+      <span>{prefix ? `Due ${due}` : due}</span>
+    </span>
+  );
+}
+
+function PlanningCardRow({
+  card,
+  sprintOptions,
+  sprintId,
+  onSprintChange,
+  onAssign,
+}: {
+  card: Card;
+  sprintOptions: Sprint[];
+  sprintId: string;
+  onSprintChange: (sprintId: string) => void;
+  onAssign: () => void;
+}) {
+  const selectId = `planning-sprint-${card.id}`;
+
+  return (
+    <article className="grid gap-3 rounded-md border border-slate-200 bg-white p-3 md:grid-cols-[minmax(0,1fr)_18rem] md:items-center">
+      <div className="min-w-0">
+        <p className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</p>
+        <h3 className="mt-1 text-sm font-medium text-slate-950">{card.title}</h3>
+        <p className="mt-1 line-clamp-2 text-sm text-slate-500">{card.description}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5">
+            <UserRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+            {card.owner}
+          </span>
+          <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
+            <PriorityIcon priority={card.priority} />
+          </span>
+          <DueBadge due={card.due} />
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] md:grid-cols-1">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor={selectId}>
+            Sprint for {card.title}
+          </label>
+          <select
+            id={selectId}
+            className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+            value={sprintId}
+            onChange={(event) => onSprintChange(event.target.value)}
+            disabled={!sprintOptions.length}
+          >
+            {sprintOptions.length ? (
+              sprintOptions.map((sprint) => (
+                <option key={sprint.id} value={sprint.id}>
+                  {sprint.name}
+                </option>
+              ))
+            ) : (
+              <option value="">No sprints</option>
+            )}
+          </select>
+        </div>
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+          type="button"
+          aria-label={`Assign ${card.title}`}
+          onClick={onAssign}
+          disabled={!sprintOptions.length}
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          Assign
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function SprintPlanBlock({
+  plan,
+  action,
+  onStart,
+  onComplete,
+}: {
+  plan: SprintPlan;
+  action: 'start' | 'complete' | 'none';
+  onStart?: (sprint: Sprint) => void;
+  onComplete?: (sprint: Sprint) => void;
+}) {
+  const cardCount = plan.cards.length;
+
+  return (
+    <article className="rounded-md border border-slate-200 bg-white p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-slate-950">{plan.sprint.name}</h3>
+          {plan.sprint.goal ? <p className="mt-1 text-sm leading-5 text-slate-500">{plan.sprint.goal}</p> : null}
+          <p className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500">
+            <CalendarDays className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+            {sprintWindow(plan.sprint)}
+          </p>
+        </div>
+        <span className="shrink-0 rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">
+          {cardCount} {cardCount === 1 ? 'card' : 'cards'}
+        </span>
+      </div>
+
+      {plan.cards.length ? (
+        <ul className="mt-3 space-y-2">
+          {plan.cards.map((card) => (
+            <li key={card.id} className="rounded-md border border-slate-100 bg-slate-50 px-2 py-2">
+              <p className="text-sm font-medium text-slate-800">{card.title}</p>
+              <p className="mt-1">
+                <DueBadge due={card.due} />
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 rounded-md border border-dashed border-slate-200 px-3 py-4 text-sm text-slate-500">No assigned cards yet.</p>
+      )}
+
+      {action === 'start' ? (
+        <button
+          className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
+          type="button"
+          aria-label={`Start ${plan.sprint.name}`}
+          onClick={() => onStart?.(plan.sprint)}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Start
+        </button>
+      ) : null}
+
+      {action === 'complete' ? (
+        <button
+          className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-xs font-medium text-white hover:bg-emerald-800"
+          type="button"
+          aria-label={`Complete ${plan.sprint.name}`}
+          onClick={() => onComplete?.(plan.sprint)}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Complete
+        </button>
+      ) : null}
     </article>
   );
 }
@@ -2051,6 +2826,10 @@ function NavButton({
       <span className={collapsed ? 'sr-only' : ''}>{label}</span>
     </button>
   );
+}
+
+function planningDashboardURL(boardId: string) {
+  return `/api/planning?boardId=${encodeURIComponent(boardId)}`;
 }
 
 async function getJSON<T>(url: string): Promise<T> {
@@ -2097,6 +2876,146 @@ function normalizeCardDetail(detail: CardDetail): CardDetail {
     comments: detail.comments ?? [],
     activity: detail.activity ?? [],
   };
+}
+
+function normalizePlanningDashboard(dashboard: PlanningDashboard): PlanningDashboard {
+  return {
+    boardId: dashboard.boardId ?? '',
+    backlog: sortCards(dashboard.backlog ?? []),
+    activeSprint: dashboard.activeSprint ? normalizeSprintPlan(dashboard.activeSprint) : null,
+    plannedSprints: sortSprintPlans((dashboard.plannedSprints ?? []).map(normalizeSprintPlan)),
+    completedSprints: sortSprintPlans((dashboard.completedSprints ?? []).map(normalizeSprintPlan)),
+  };
+}
+
+function normalizeSprintPlan(plan: SprintPlan): SprintPlan {
+  return {
+    sprint: plan.sprint,
+    cards: sortCards(plan.cards ?? []),
+  };
+}
+
+function addSprintToDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+  const current = normalizePlanningDashboard(dashboard);
+  const existing = current.plannedSprints.some((plan) => plan.sprint.id === sprint.id);
+  const plannedSprints = existing
+    ? current.plannedSprints.map((plan) => (plan.sprint.id === sprint.id ? { ...plan, sprint } : plan))
+    : [...current.plannedSprints, { sprint, cards: [] }];
+
+  return {
+    ...current,
+    plannedSprints: sortSprintPlans(plannedSprints),
+  };
+}
+
+function assignCardInDashboard(dashboard: PlanningDashboard, card: Card): PlanningDashboard {
+  const current = normalizePlanningDashboard(dashboard);
+  const next: PlanningDashboard = {
+    boardId: current.boardId,
+    backlog: current.backlog.filter((candidate) => candidate.id !== card.id),
+    activeSprint: current.activeSprint
+      ? {
+          ...current.activeSprint,
+          cards: current.activeSprint.cards.filter((candidate) => candidate.id !== card.id),
+        }
+      : null,
+    plannedSprints: current.plannedSprints.map((plan) => ({
+      ...plan,
+      cards: plan.cards.filter((candidate) => candidate.id !== card.id),
+    })),
+    completedSprints: current.completedSprints.map((plan) => ({
+      ...plan,
+      cards: plan.cards.filter((candidate) => candidate.id !== card.id),
+    })),
+  };
+
+  if (!card.sprintId) {
+    return {
+      ...next,
+      backlog: sortCards([...next.backlog, card]),
+    };
+  }
+
+  if (next.activeSprint?.sprint.id === card.sprintId) {
+    return {
+      ...next,
+      activeSprint: {
+        ...next.activeSprint,
+        cards: sortCards([...next.activeSprint.cards, card]),
+      },
+    };
+  }
+
+  return {
+    ...next,
+    plannedSprints: next.plannedSprints.map((plan) =>
+      plan.sprint.id === card.sprintId
+        ? {
+            ...plan,
+            cards: sortCards([...plan.cards, card]),
+          }
+        : plan,
+    ),
+    completedSprints: next.completedSprints.map((plan) =>
+      plan.sprint.id === card.sprintId
+        ? {
+            ...plan,
+            cards: sortCards([...plan.cards, card]),
+          }
+        : plan,
+    ),
+  };
+}
+
+function startSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+  const current = normalizePlanningDashboard(dashboard);
+  const plan = current.plannedSprints.find((candidate) => candidate.sprint.id === sprint.id) ?? { sprint, cards: [] };
+
+  return {
+    ...current,
+    activeSprint: {
+      ...plan,
+      sprint,
+    },
+    plannedSprints: current.plannedSprints.filter((candidate) => candidate.sprint.id !== sprint.id),
+  };
+}
+
+function completeSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+  const current = normalizePlanningDashboard(dashboard);
+  const completedPlan = current.activeSprint?.sprint.id === sprint.id ? current.activeSprint : { sprint, cards: [] };
+  const completedSprints = current.completedSprints.filter((candidate) => candidate.sprint.id !== sprint.id);
+
+  return {
+    ...current,
+    activeSprint: current.activeSprint?.sprint.id === sprint.id ? null : current.activeSprint,
+    completedSprints: sortSprintPlans([...completedSprints, { ...completedPlan, sprint }]),
+  };
+}
+
+function sortCards(cards: Card[]) {
+  return [...cards].sort((left, right) => left.position - right.position || left.title.localeCompare(right.title));
+}
+
+function sortSprintPlans(plans: SprintPlan[]) {
+  return [...plans].sort((left, right) => {
+    const leftDate = left.sprint.startsOn || left.sprint.startedAt || left.sprint.completedAt || '';
+    const rightDate = right.sprint.startsOn || right.sprint.startedAt || right.sprint.completedAt || '';
+    return leftDate.localeCompare(rightDate) || left.sprint.name.localeCompare(right.sprint.name);
+  });
+}
+
+export function sprintWindow(sprint: Sprint) {
+  if (sprint.startsOn && sprint.endsOn) {
+    return `${sprint.startsOn} - ${sprint.endsOn}`;
+  }
+  if (sprint.startsOn) {
+    return `Starts ${sprint.startsOn}`;
+  }
+  if (sprint.endsOn) {
+    return `Ends ${sprint.endsOn}`;
+  }
+  return 'Dates not set';
 }
 
 function selectedCardIdForBoard(currentCardId: string, board: Board) {
@@ -2232,6 +3151,28 @@ export function resolveMoveTarget(board: Board, overId: string) {
   return null;
 }
 
+export function resolveDragMoveTarget(board: Board, activeCardId: string, overId: string, collisionIds: string[] = []) {
+  const activeCard = findCard(board, activeCardId);
+  const seen = new Set<string>();
+  const candidates = [overId, ...collisionIds].filter((id) => {
+    if (!id || id === activeCardId || seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    return true;
+  });
+  const targets = candidates.flatMap((id) => {
+    const target = resolveMoveTarget(board, id);
+    return target ? [target] : [];
+  });
+
+  if (!targets.length) {
+    return null;
+  }
+
+  return targets.find((target) => activeCard && target.columnId !== activeCard.columnId) ?? targets[0];
+}
+
 function findCard(board: Board, cardId: string) {
   return board.columns.flatMap((column) => column.cards).find((card) => card.id === cardId);
 }
@@ -2261,6 +3202,38 @@ function PriorityIcon({ priority }: { priority: Priority }) {
     default:
       return <CircleDot className="h-3.5 w-3.5" aria-hidden="true" />;
   }
+}
+
+function dueStatus(due: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due);
+  if (!match) {
+    return {
+      label: 'date missing',
+      className: 'border-slate-200 bg-white text-slate-500',
+    };
+  }
+
+  const dueDay = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysUntilDue = Math.round((dueDay - today) / 86_400_000);
+
+  if (daysUntilDue < 0) {
+    return {
+      label: 'overdue',
+      className: 'border-rose-200 bg-rose-50 text-rose-700',
+    };
+  }
+  if (daysUntilDue <= 2) {
+    return {
+      label: 'due soon',
+      className: 'border-amber-200 bg-amber-50 text-amber-700',
+    };
+  }
+  return {
+    label: 'scheduled',
+    className: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  };
 }
 
 function columnAccent(position: number) {

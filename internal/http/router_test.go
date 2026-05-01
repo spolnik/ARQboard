@@ -414,6 +414,68 @@ func TestRouterRejectsWorkspaceMemberManagementForNonAdmins(t *testing.T) {
 	}
 }
 
+func TestRouterValidatesWorkspaceMemberPayloads(t *testing.T) {
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: testUser()},
+		TeamStore: &fakeTeamStore{},
+	})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create member missing email", method: http.MethodPost, path: "/api/members", body: `{"password":"correct horse battery qa"}`},
+		{name: "create member bad json", method: http.MethodPost, path: "/api/members", body: `{`},
+		{name: "update member missing role", method: http.MethodPatch, path: "/api/members/member-2", body: `{}`},
+		{name: "update member bad json", method: http.MethodPatch, path: "/api/members/member-2", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestRouterMapsTeamStoreErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "validation", err: db.ErrValidation, want: http.StatusBadRequest},
+		{name: "not found", err: db.ErrNotFound, want: http.StatusNotFound},
+		{name: "database unavailable", err: db.ErrDatabaseUnavailable, want: http.StatusServiceUnavailable},
+		{name: "internal", err: errors.New("boom"), want: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := NewRouter(Options{
+				AuthStore: &fakeAuthStore{user: testUser()},
+				TeamStore: &fakeTeamStore{err: tt.err},
+			})
+			req := httptest.NewRequest(http.MethodGet, "/api/members", nil)
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != tt.want {
+				t.Fatalf("status = %d, want %d", res.Code, tt.want)
+			}
+		})
+	}
+}
+
 func TestRouterCreatesCards(t *testing.T) {
 	store := fakeBoardStore{
 		card: db.BoardCard{
@@ -422,7 +484,7 @@ func TestRouterCreatesCards(t *testing.T) {
 			Title:    "Run smoke test",
 			Owner:    "QA",
 			Priority: "Normal",
-			Due:      "Later",
+			Due:      "2026-05-08",
 		},
 	}
 	router := NewRouter(Options{BoardStore: store})
@@ -468,9 +530,9 @@ func TestRouterMovesCards(t *testing.T) {
 
 func TestRouterUpdatesCardsAndCreatesComments(t *testing.T) {
 	router := NewRouter(Options{BoardStore: fakeBoardStore{
-		card: db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "May 9"},
+		card: db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "2026-05-09"},
 		detail: db.CardDetail{
-			Card:     db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "May 9"},
+			Card:     db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "2026-05-09"},
 			Comments: []db.CardComment{{ID: "comment-1", CardID: "card-1", Body: "Looks good"}},
 			Activity: []db.ActivityEvent{{ID: "event-1", CardID: "card-1", EventType: "card.commented"}},
 		},
@@ -482,7 +544,7 @@ func TestRouterUpdatesCardsAndCreatesComments(t *testing.T) {
 		"description":"Updated body",
 		"priority":"high",
 		"ownerInitials":"qa",
-		"due":"May 9"
+		"due":"2026-05-09"
 	}`)))
 
 	if update.Code != http.StatusOK {
@@ -723,6 +785,109 @@ func TestRouterValidatesCreateCardPayload(t *testing.T) {
 	}
 }
 
+func TestRouterManagesSprintPlanning(t *testing.T) {
+	sprint := db.Sprint{
+		ID:          "sprint-1",
+		WorkspaceID: "workspace-1",
+		BoardID:     "board-1",
+		Name:        "Sprint 2026-05 Platform",
+		Goal:        "Ship planning foundations",
+		Status:      "planned",
+		StartsOn:    "2026-05-04",
+		EndsOn:      "2026-05-15",
+	}
+	active := sprint
+	active.Status = "active"
+	active.StartedAt = "2026-05-04T08:00:00Z"
+	completed := active
+	completed.Status = "completed"
+	completed.CompletedAt = "2026-05-15T16:00:00Z"
+	card := db.BoardCard{ID: "card-1", ColumnID: "column-planned", SprintID: sprint.ID, Title: "Wire auth session cookie flow", Owner: "MS", Priority: "High", Due: "2026-04-30"}
+	store := fakeBoardStore{
+		dashboard: db.PlanningDashboard{
+			BoardID:        "board-1",
+			Backlog:        []db.BoardCard{{ID: "card-1", ColumnID: "column-planned", Title: "Wire auth session cookie flow", Owner: "MS", Priority: "High", Due: "2026-04-30"}},
+			PlannedSprints: []db.SprintPlan{{Sprint: sprint}},
+		},
+		sprint:    sprint,
+		started:   active,
+		completed: completed,
+		assigned:  card,
+	}
+	router := NewRouter(Options{BoardStore: store})
+
+	dashboard := httptest.NewRecorder()
+	router.ServeHTTP(dashboard, httptest.NewRequest(http.MethodGet, "/api/planning?boardId=board-1", nil))
+	if dashboard.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want %d", dashboard.Code, http.StatusOK)
+	}
+	var planning db.PlanningDashboard
+	if err := json.NewDecoder(dashboard.Body).Decode(&planning); err != nil {
+		t.Fatalf("Decode planning returned error: %v", err)
+	}
+	if len(planning.Backlog) != 1 || len(planning.PlannedSprints) != 1 {
+		t.Fatalf("planning = %#v, want backlog and planned sprint", planning)
+	}
+
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/sprints", bytes.NewBufferString(`{"boardId":"board-1","name":"Sprint 2026-05 Platform","goal":"Ship planning foundations","startsOn":"2026-05-04","endsOn":"2026-05-15"}`)))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create sprint status = %d, want %d", create.Code, http.StatusCreated)
+	}
+
+	assign := httptest.NewRecorder()
+	router.ServeHTTP(assign, httptest.NewRequest(http.MethodPatch, "/api/cards/card-1/sprint", bytes.NewBufferString(`{"sprintId":"sprint-1"}`)))
+	if assign.Code != http.StatusOK {
+		t.Fatalf("assign sprint status = %d, want %d", assign.Code, http.StatusOK)
+	}
+	var assigned db.BoardCard
+	if err := json.NewDecoder(assign.Body).Decode(&assigned); err != nil {
+		t.Fatalf("Decode assigned card returned error: %v", err)
+	}
+	if assigned.SprintID != "sprint-1" {
+		t.Fatalf("assigned.SprintID = %q, want sprint-1", assigned.SprintID)
+	}
+
+	start := httptest.NewRecorder()
+	router.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/sprints/sprint-1/start", nil))
+	if start.Code != http.StatusOK {
+		t.Fatalf("start sprint status = %d, want %d", start.Code, http.StatusOK)
+	}
+
+	complete := httptest.NewRecorder()
+	router.ServeHTTP(complete, httptest.NewRequest(http.MethodPost, "/api/sprints/sprint-1/complete", bytes.NewBufferString(`{"rollover":[{"cardId":"card-1","sprintId":""}]}`)))
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete sprint status = %d, want %d", complete.Code, http.StatusOK)
+	}
+}
+
+func TestRouterValidatesSprintPlanningPayloads(t *testing.T) {
+	router := NewRouter(Options{BoardStore: fakeBoardStore{}})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create sprint bad json", method: http.MethodPost, path: "/api/sprints", body: `{`},
+		{name: "create sprint missing name", method: http.MethodPost, path: "/api/sprints", body: `{"boardId":"board-1"}`},
+		{name: "complete sprint bad json", method: http.MethodPost, path: "/api/sprints/sprint-1/complete", body: `{`},
+		{name: "assign card to sprint bad json", method: http.MethodPatch, path: "/api/cards/card-1/sprint", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body)))
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 type fakeBoardStore struct {
 	board      db.Board
 	renamed    db.Board
@@ -732,6 +897,11 @@ type fakeBoardStore struct {
 	wikiPages  []db.WikiPage
 	workspaces []db.Workspace
 	boards     []db.BoardSummary
+	dashboard  db.PlanningDashboard
+	sprint     db.Sprint
+	started    db.Sprint
+	completed  db.Sprint
+	assigned   db.BoardCard
 	err        error
 }
 
@@ -913,6 +1083,41 @@ func (store fakeBoardStore) UpdateWikiPage(_ context.Context, _ db.UpdateWikiPag
 	return store.wikiPage, nil
 }
 
+func (store fakeBoardStore) GetPlanningDashboard(context.Context, string) (db.PlanningDashboard, error) {
+	if store.err != nil {
+		return db.PlanningDashboard{}, store.err
+	}
+	return store.dashboard, nil
+}
+
+func (store fakeBoardStore) CreateSprint(_ context.Context, _ db.CreateSprintParams) (db.Sprint, error) {
+	if store.err != nil {
+		return db.Sprint{}, store.err
+	}
+	return store.sprint, nil
+}
+
+func (store fakeBoardStore) StartSprint(_ context.Context, _ string) (db.Sprint, error) {
+	if store.err != nil {
+		return db.Sprint{}, store.err
+	}
+	return store.started, nil
+}
+
+func (store fakeBoardStore) CompleteSprint(_ context.Context, _ db.CompleteSprintParams) (db.Sprint, error) {
+	if store.err != nil {
+		return db.Sprint{}, store.err
+	}
+	return store.completed, nil
+}
+
+func (store fakeBoardStore) AssignCardToSprint(_ context.Context, _ db.AssignCardToSprintParams) (db.BoardCard, error) {
+	if store.err != nil {
+		return db.BoardCard{}, store.err
+	}
+	return store.assigned, nil
+}
+
 func testUser() db.User {
 	return db.User{
 		ID:          "user-1",
@@ -933,7 +1138,7 @@ func testBoard() db.Board {
 				Title:    "Planned",
 				Position: 0,
 				Cards: []db.BoardCard{
-					{ID: "card-1", ColumnID: "column-planned", Title: "Wire auth session cookie flow", Owner: "MS", Priority: "High", Due: "Apr 30"},
+					{ID: "card-1", ColumnID: "column-planned", Title: "Wire auth session cookie flow", Owner: "MS", Priority: "High", Due: "2026-04-30"},
 				},
 			},
 			{ID: "column-review", Title: "Ready for review", Position: 1},

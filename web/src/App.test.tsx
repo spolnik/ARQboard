@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
-import App, { resolveMoveTarget } from './App';
+import App, { resolveDragMoveTarget, resolveMoveTarget, sprintWindow } from './App';
 
 const userFixture = {
   id: 'user-1',
@@ -25,7 +25,7 @@ const boardFixture = {
           title: 'Wire auth session cookie flow',
           owner: 'MS',
           priority: 'High',
-          due: 'Apr 30',
+          due: '2026-04-30',
           description: 'Map the session cookie lifecycle.',
           position: 0,
         },
@@ -42,7 +42,7 @@ const boardFixture = {
           title: 'Ready for review API shape',
           owner: 'AK',
           priority: 'Urgent',
-          due: 'Today',
+          due: '2026-05-01',
           description: 'Lock the first JSON contracts.',
           position: 0,
         },
@@ -59,7 +59,7 @@ const boardFixture = {
           title: 'Deployment checklist',
           owner: 'JL',
           priority: 'Normal',
-          due: 'May 3',
+          due: '2026-05-03',
           description: 'Document deployment checks.',
           position: 0,
         },
@@ -145,7 +145,7 @@ const createdCard = {
   title: 'Run local smoke test',
   owner: 'QA',
   priority: 'Normal',
-  due: 'Later',
+  due: '2026-05-08',
   description: 'New card created locally.',
   position: 1,
 };
@@ -172,7 +172,7 @@ const updatedCard = {
   description: 'Document cookie boundaries and refresh behavior.',
   owner: 'QA',
   priority: 'Urgent',
-  due: 'May 9',
+  due: '2026-05-09',
 };
 
 const cardDetail = {
@@ -224,6 +224,36 @@ const updatedWorkspaceMember = {
   role: 'admin',
 };
 
+const sprintFixture = {
+  id: 'sprint-1',
+  workspaceId: 'workspace-1',
+  boardId: 'board-1',
+  name: 'Sprint 2026-05 Platform',
+  goal: 'Ship planning foundations',
+  status: 'planned',
+  startsOn: '2026-05-04',
+  endsOn: '2026-05-15',
+};
+
+const activeSprintFixture = {
+  ...sprintFixture,
+  status: 'active',
+  startedAt: '2026-05-04T08:00:00Z',
+};
+
+const completedSprintFixture = {
+  ...activeSprintFixture,
+  status: 'completed',
+  completedAt: '2026-05-15T16:00:00Z',
+};
+
+const planningDashboardFixture = {
+  boardId: 'board-1',
+  backlog: [boardFixture.columns[0].cards[0]],
+  plannedSprints: [],
+  completedSprints: [],
+};
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -238,6 +268,7 @@ async function clickPrimaryNavButton(name: RegExp) {
 
 describe('App', () => {
   beforeEach(() => {
+    let planningResponse: unknown = planningDashboardFixture;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -314,6 +345,28 @@ describe('App', () => {
         if (url === '/api/members/member-2' && init?.method === 'PATCH') {
           return jsonResponse(updatedWorkspaceMember);
         }
+        if (url === '/api/planning?boardId=board-1') {
+          return jsonResponse(planningResponse);
+        }
+        if (url === '/api/sprints' && init?.method === 'POST') {
+          return jsonResponse(sprintFixture, 201);
+        }
+        if (url === '/api/cards/card-1/sprint' && init?.method === 'PATCH') {
+          return jsonResponse({ ...boardFixture.columns[0].cards[0], sprintId: 'sprint-1' });
+        }
+        if (url === '/api/sprints/sprint-1/start' && init?.method === 'POST') {
+          return jsonResponse(activeSprintFixture);
+        }
+        if (url === '/api/sprints/sprint-1/complete' && init?.method === 'POST') {
+          planningResponse = {
+            boardId: 'board-1',
+            backlog: [{ ...boardFixture.columns[0].cards[0], sprintId: '' }],
+            activeSprint: null,
+            plannedSprints: [],
+            completedSprints: [{ sprint: completedSprintFixture, cards: [] }],
+          };
+          return jsonResponse(completedSprintFixture);
+        }
 
         throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
       }),
@@ -360,7 +413,7 @@ describe('App', () => {
     const taskCard = screen.getByRole('button', { name: /view card wire auth session cookie flow/i });
     expect(taskCard).toHaveClass('cursor-grab');
     expect(screen.getByLabelText(/priority high/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/due apr 30/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/due 2026-04-30 overdue/i)).toHaveClass('border-rose-200');
     expect(screen.queryByRole('button', { name: /drag wire auth session cookie flow/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /move wire auth session cookie flow to in progress/i })).not.toBeInTheDocument();
     expect(screen.getByText('Ready for review')).toBeInTheDocument();
@@ -368,6 +421,41 @@ describe('App', () => {
     expect(screen.getAllByText('Deployment checklist').length).toBeGreaterThan(0);
     expect(fetch).toHaveBeenCalledWith('/api/boards');
     expect(fetch).toHaveBeenCalledWith('/api/boards/board-1');
+  });
+
+  it('marks cards with missing due dates without breaking the board', async () => {
+    const boardWithMissingDue = {
+      ...boardFixture,
+      columns: boardFixture.columns.map((column) => ({
+        ...column,
+        cards: column.cards.map((card) => (card.id === 'card-1' ? { ...card, due: '' } : card)),
+      })),
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
+          return jsonResponse(boardWithMissingDue);
+        }
+        if (url === '/api/cards/card-1' && !init?.method) {
+          return jsonResponse({ card: boardWithMissingDue.columns[0].cards[0], comments: [], activity: [] });
+        }
+
+        throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByLabelText(/date missing/i)).toBeInTheDocument();
   });
 
   it('shows a helpful error when the board cannot load', async () => {
@@ -640,6 +728,7 @@ describe('App', () => {
   it('creates a new board and selects it', async () => {
     render(<App />);
 
+    await clickPrimaryNavButton(/settings/i);
     fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
     fireEvent.change(screen.getByLabelText(/board name/i), {
       target: { value: 'Security Backlog' },
@@ -662,6 +751,11 @@ describe('App', () => {
   it('adds and renames board columns', async () => {
     render(<App />);
 
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add column/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /rename planned/i })).not.toBeInTheDocument();
+
+    await clickPrimaryNavButton(/settings/i);
     fireEvent.click(await screen.findByRole('button', { name: /add column/i }));
     fireEvent.change(screen.getByLabelText(/column title/i), {
       target: { value: 'Blocked' },
@@ -677,7 +771,7 @@ describe('App', () => {
         }),
       ),
     );
-    expect(screen.getByRole('region', { name: /blocked column/i })).toBeInTheDocument();
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /rename planned/i }));
     fireEvent.change(screen.getByLabelText(/column title/i), {
@@ -694,7 +788,7 @@ describe('App', () => {
         }),
       ),
     );
-    expect(screen.getByRole('region', { name: /backlog column/i })).toBeInTheDocument();
+    expect(screen.getByText('Backlog')).toBeInTheDocument();
   });
 
   it('keeps the workspace usable when no boards exist yet', async () => {
@@ -717,7 +811,9 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /loading board/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /no boards/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /new card/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /open add column/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /open add column/i })).not.toBeInTheDocument();
+    await clickPrimaryNavButton(/settings/i);
+    expect(screen.getByRole('button', { name: /add column/i })).toBeDisabled();
   });
 
   it('returns to login when the board list request is unauthenticated', async () => {
@@ -771,6 +867,7 @@ describe('App', () => {
 
     render(<App />);
 
+    await clickPrimaryNavButton(/settings/i);
     fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
     fireEvent.change(screen.getByLabelText(/board name/i), {
       target: { value: 'Security Backlog' },
@@ -779,6 +876,7 @@ describe('App', () => {
     expect(await screen.findByText(/could not create the board/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    await clickPrimaryNavButton(/settings/i);
     fireEvent.click(screen.getByRole('button', { name: /add column/i }));
     fireEvent.change(screen.getByLabelText(/column title/i), {
       target: { value: 'Blocked' },
@@ -930,8 +1028,8 @@ describe('App', () => {
     fireEvent.change(within(detail).getByLabelText(/owner initials/i), {
       target: { value: 'QA' },
     });
-    fireEvent.change(within(detail).getByLabelText(/due label/i), {
-      target: { value: 'May 9' },
+    fireEvent.change(within(detail).getByLabelText(/due date/i), {
+      target: { value: '2026-05-09' },
     });
     fireEvent.click(screen.getByRole('button', { name: /save card/i }));
 
@@ -945,7 +1043,7 @@ describe('App', () => {
             description: 'Document cookie boundaries and refresh behavior.',
             priority: 'urgent',
             ownerInitials: 'QA',
-            due: 'May 9',
+            due: '2026-05-09',
           }),
         }),
       ),
@@ -1031,6 +1129,42 @@ describe('App', () => {
     expect(resolveMoveTarget(board, 'missing-target')).toBeNull();
   });
 
+  it('resolves cross-column drag targets when the active card remains the top collision', () => {
+    const board = boardFixture as Parameters<typeof resolveDragMoveTarget>[0];
+
+    expect(resolveDragMoveTarget(board, 'card-1', 'card-1', ['card-1', 'column-planned', 'column-progress'])).toEqual({
+      columnId: 'column-progress',
+      position: 1,
+    });
+    expect(resolveDragMoveTarget(board, 'card-1', 'card-2', ['card-1', 'card-2'])).toEqual({
+      columnId: 'column-progress',
+      position: 0,
+    });
+    expect(resolveDragMoveTarget(board, 'card-1', 'column-planned', ['card-1', 'column-planned'])).toEqual({
+      columnId: 'column-planned',
+      position: 1,
+    });
+    expect(resolveDragMoveTarget(board, 'card-1', 'card-1', ['card-1', 'missing-target'])).toBeNull();
+  });
+
+  it('formats sprint windows for complete and partial date ranges', () => {
+    const baseSprint = {
+      id: 'sprint-window',
+      workspaceId: 'workspace-1',
+      boardId: 'board-1',
+      name: 'Sprint window',
+      goal: '',
+      status: 'planned' as const,
+    };
+
+    expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01', endsOn: '2026-05-15' })).toBe(
+      '2026-05-01 - 2026-05-15',
+    );
+    expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01' })).toBe('Starts 2026-05-01');
+    expect(sprintWindow({ ...baseSprint, endsOn: '2026-05-15' })).toBe('Ends 2026-05-15');
+    expect(sprintWindow(baseSprint)).toBe('Dates not set');
+  });
+
   it('filters cards and wiki pages with workspace search', async () => {
     render(<App />);
 
@@ -1050,6 +1184,9 @@ describe('App', () => {
   it('switches between board, wiki, and settings views', async () => {
     render(<App />);
 
+    await clickPrimaryNavButton(/planning/i);
+    expect(screen.getByRole('heading', { name: /planning dashboard/i })).toBeInTheDocument();
+
     await clickPrimaryNavButton(/wiki/i);
     expect(screen.getByRole('heading', { name: /wiki pages/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /platform board/i })).not.toBeInTheDocument();
@@ -1059,6 +1196,162 @@ describe('App', () => {
 
     await clickPrimaryNavButton(/boards/i);
     expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('plans named sprints from backlog through completion', async () => {
+    render(<App />);
+
+    await clickPrimaryNavButton(/planning/i);
+
+    expect(await screen.findByRole('heading', { name: /planning dashboard/i })).toBeInTheDocument();
+    const backlog = screen.getByRole('region', { name: /backlog/i });
+    expect(within(backlog).getByText('Wire auth session cookie flow')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/sprint name/i), {
+      target: { value: 'Sprint 2026-05 Platform' },
+    });
+    fireEvent.change(screen.getByLabelText(/sprint goal/i), {
+      target: { value: 'Ship planning foundations' },
+    });
+    fireEvent.change(screen.getByLabelText(/starts on/i), {
+      target: { value: '2026-05-04' },
+    });
+    fireEvent.change(screen.getByLabelText(/ends on/i), {
+      target: { value: '2026-05-15' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create sprint/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/sprints',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            boardId: 'board-1',
+            name: 'Sprint 2026-05 Platform',
+            goal: 'Ship planning foundations',
+            startsOn: '2026-05-04',
+            endsOn: '2026-05-15',
+          }),
+        }),
+      ),
+    );
+
+    fireEvent.change(screen.getByLabelText(/sprint for wire auth session cookie flow/i), {
+      target: { value: 'sprint-1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /assign wire auth session cookie flow/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1/sprint',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ sprintId: 'sprint-1' }),
+        }),
+      ),
+    );
+
+    const planned = screen.getByRole('region', { name: /planned sprints/i });
+    expect(within(planned).getByText('Wire auth session cookie flow')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /start sprint 2026-05 platform/i }));
+    expect(await screen.findByRole('region', { name: /active sprint/i })).toHaveTextContent('Sprint 2026-05 Platform');
+
+    fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-05 platform/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^complete sprint$/i }));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/sprints/sprint-1/complete',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ rollover: [{ cardId: 'card-1', sprintId: '' }] }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole('region', { name: /completed sprints/i })).toHaveTextContent('Sprint 2026-05 Platform');
+  });
+
+  it('chooses next-sprint rollover targets when completing the active sprint', async () => {
+    const currentSprint = {
+      ...activeSprintFixture,
+      id: 'sprint-current',
+      name: 'Sprint 2026-04 Current',
+    };
+    const nextSprint = {
+      ...sprintFixture,
+      id: 'sprint-next',
+      name: 'Sprint 2026-05 Follow-up',
+    };
+    const activeCards = [
+      { ...boardFixture.columns[0].cards[0], sprintId: currentSprint.id },
+      { ...boardFixture.columns[1].cards[0], sprintId: currentSprint.id },
+    ];
+    let planningResponse: unknown = {
+      boardId: 'board-1',
+      backlog: [],
+      activeSprint: { sprint: currentSprint, cards: activeCards },
+      plannedSprints: [{ sprint: nextSprint, cards: [] }],
+      completedSprints: [],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/boards/board-1') {
+          return jsonResponse(boardFixture);
+        }
+        if (url === '/api/planning?boardId=board-1') {
+          return jsonResponse(planningResponse);
+        }
+        if (url === '/api/sprints/sprint-current/complete' && init?.method === 'POST') {
+          planningResponse = {
+            boardId: 'board-1',
+            backlog: [{ ...activeCards[1], sprintId: '' }],
+            activeSprint: null,
+            plannedSprints: [{ sprint: nextSprint, cards: [{ ...activeCards[0], sprintId: nextSprint.id }] }],
+            completedSprints: [{ sprint: { ...currentSprint, status: 'completed', completedAt: '2026-05-01T12:00:00Z' }, cards: [] }],
+          };
+          return jsonResponse({ ...currentSprint, status: 'completed', completedAt: '2026-05-01T12:00:00Z' });
+        }
+
+        throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
+      }),
+    );
+
+    render(<App />);
+    await clickPrimaryNavButton(/planning/i);
+
+    expect(await screen.findByRole('region', { name: /active sprint/i })).toHaveTextContent('Sprint 2026-04 Current');
+
+    fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-04 current/i }));
+    fireEvent.change(screen.getByLabelText(/completion target for wire auth session cookie flow/i), {
+      target: { value: 'sprint-next' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^complete sprint$/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/sprints/sprint-current/complete',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            rollover: [
+              { cardId: 'card-2', sprintId: '' },
+              { cardId: 'card-1', sprintId: 'sprint-next' },
+            ],
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole('region', { name: /planned sprints/i })).toHaveTextContent('Wire auth session cookie flow');
   });
 
   it('expands the kanban board and collapses the left navigation', async () => {
@@ -1085,10 +1378,13 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
-    expect(screen.getByRole('complementary', { name: /wiki pages/i })).toBeInTheDocument();
+    const sidePanel = screen.getByRole('complementary', { name: /board side panel/i });
+    expect(within(sidePanel).getByRole('complementary', { name: /wiki pages/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /collapse wiki and detail panel/i })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /collapse wiki and detail panel/i }));
-    expect(screen.getByRole('button', { name: /expand wiki and detail panel/i })).toBeInTheDocument();
+    fireEvent.click(within(sidePanel).getByRole('button', { name: /collapse wiki and detail panel/i }));
+    const collapsedPanel = screen.getByRole('complementary', { name: /collapsed board side panel/i });
+    expect(within(collapsedPanel).getByRole('button', { name: /expand wiki and detail panel/i })).toBeInTheDocument();
     expect(screen.queryByRole('complementary', { name: /wiki pages/i })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /view card wire auth session cookie flow/i }));
@@ -1106,10 +1402,55 @@ describe('App', () => {
     expect(within(page).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
     expect(within(page).getByText(/map the session cookie lifecycle/i)).toBeInTheDocument();
     expect(within(page).getByText(/Owner MS/i)).toBeInTheDocument();
+    expect(within(page).getByText(/Due 2026-04-30/i)).toBeInTheDocument();
     expect(within(page).getByText(/Activity/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /back to board/i }));
     expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+  });
+
+  it('edits card details from the dedicated card page', async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /view card wire auth session cookie flow/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open card page/i }));
+
+    const page = screen.getByRole('region', { name: /card detail page/i });
+    fireEvent.click(within(page).getByRole('button', { name: /edit card/i }));
+    fireEvent.change(within(page).getByLabelText(/card title/i), {
+      target: { value: 'Wire production auth flow' },
+    });
+    fireEvent.change(within(page).getByLabelText(/description/i), {
+      target: { value: 'Document cookie boundaries and refresh behavior.' },
+    });
+    fireEvent.change(within(page).getByLabelText(/priority/i), {
+      target: { value: 'urgent' },
+    });
+    fireEvent.change(within(page).getByLabelText(/owner initials/i), {
+      target: { value: 'QA' },
+    });
+    fireEvent.change(within(page).getByLabelText(/due date/i), {
+      target: { value: '2026-05-09' },
+    });
+    fireEvent.click(within(page).getByRole('button', { name: /save card/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: 'Wire production auth flow',
+            description: 'Document cookie boundaries and refresh behavior.',
+            priority: 'urgent',
+            ownerInitials: 'QA',
+            due: '2026-05-09',
+          }),
+        }),
+      ),
+    );
+    expect(within(page).getByRole('heading', { name: /wire production auth flow/i })).toBeInTheDocument();
+    expect(within(page).getByText(/Due 2026-05-09/i)).toBeInTheDocument();
   });
 
   it('manages workspace members and roles from settings', async () => {
@@ -1245,7 +1586,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText(/markdown body/i), {
       target: {
         value:
-          '# Deploy runbook\n\nUse **bold checks**, _careful rollout_, [release docs](https://example.com/runbook), and `kubectl`.\n\n> Pause if readiness fails.\n\n1. Build image\n2. Run smoke test\n\n```bash\ngo test ./...\n```\n\n---\n\n<script>alert("x")</script>',
+          '# Deploy runbook\n\nUse **bold checks**, _careful rollout_, [release docs](https://example.com/runbook), and `kubectl`.\n\n> Pause if readiness fails.\n\n1. Build image\n2. Run smoke test\n\n### Risk table\n\n| Risk | Owner |\n| --- | --- |\n| Drift | QA |\n\n```bash\ngo test ./...\n```\n\n---\n\n<script>alert("x")</script>',
       },
     });
 
@@ -1257,6 +1598,9 @@ describe('App', () => {
     expect(within(preview).getByText('kubectl').tagName).toBe('CODE');
     expect(within(preview).getByText('Pause if readiness fails.').closest('blockquote')).not.toBeNull();
     expect(within(preview).getByText('Build image').closest('ol')).not.toBeNull();
+    expect(within(preview).getByRole('heading', { name: /risk table/i })).toBeInTheDocument();
+    expect(within(preview).getByText('Risk').closest('th')).not.toBeNull();
+    expect(within(preview).getByText('QA').closest('td')).not.toBeNull();
     expect(within(preview).getByText('go test ./...').closest('pre')).not.toBeNull();
     expect(preview.querySelector('script')).toBeNull();
   });
