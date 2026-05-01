@@ -301,7 +301,7 @@ func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 		Description:   "Document cookie boundaries and refresh behavior.",
 		Priority:      "urgent",
 		OwnerInitials: "qa",
-		Due:           "May 9",
+		Due:           "2026-05-09",
 	})
 	if err != nil {
 		t.Fatalf("UpdateCard returned error: %v", err)
@@ -314,6 +314,19 @@ func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 	}
 	if updated.Owner != "QA" {
 		t.Fatalf("updated owner = %q, want QA", updated.Owner)
+	}
+	if updated.Due != "2026-05-09" {
+		t.Fatalf("updated due = %q, want 2026-05-09", updated.Due)
+	}
+	if _, err := store.UpdateCard(ctx, UpdateCardParams{
+		CardID:        card.ID,
+		Title:         "Wire production auth flow",
+		Description:   "Document cookie boundaries and refresh behavior.",
+		Priority:      "urgent",
+		OwnerInitials: "qa",
+		Due:           "Soon",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("UpdateCard fuzzy due error = %v, want ErrValidation", err)
 	}
 
 	detail, err := store.CreateCardComment(ctx, CreateCardCommentParams{
@@ -581,7 +594,7 @@ func TestBoardStoreValidationAndNotFoundPaths(t *testing.T) {
 		{
 			name: "update card unknown id",
 			err: func() error {
-				_, err := store.UpdateCard(ctx, UpdateCardParams{CardID: "missing", Title: "Card"})
+				_, err := store.UpdateCard(ctx, UpdateCardParams{CardID: "missing", Title: "Card", Due: "2026-05-09"})
 				return err
 			}(),
 			want: ErrNotFound,

@@ -19,7 +19,7 @@ The first version should be boring to operate: one Docker image, one Postgres da
 
 - Full Jira parity.
 - Complex custom workflows.
-- Sprint planning, estimates, burndown charts, or reporting dashboards.
+- Estimates, burndown charts, or reporting dashboards.
 - Marketplace-style plugins.
 - Multi-region high availability.
 - Realtime collaboration as a hard requirement.
@@ -168,6 +168,7 @@ boards
 board_members
 columns
 cards
+sprints
 card_comments
 activity_events
 wiki_pages
@@ -197,8 +198,9 @@ automation_rules
 ### Workspaces And Boards
 
 - A workspace contains boards and members.
-- A board contains ordered columns.
+- A board contains ordered columns and has at most one active sprint.
 - Columns contain ordered cards.
+- Sprints belong to a single board. Completing a sprint moves selected cards into a planned next sprint and returns the remaining cards to backlog.
 - V1 can assume one workspace per deployment if that simplifies the first implementation, but the schema should not block multiple workspaces later.
 
 ### Cards
@@ -249,7 +251,7 @@ Possible later features:
 
 Use JSON over HTTP under `/api`.
 
-Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, movement, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
+Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, movement, sprint planning, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
 
 Suggested endpoints:
 
@@ -275,9 +277,15 @@ GET    /api/cards/{cardID}
 PATCH  /api/cards/{cardID}
 DELETE /api/cards/{cardID}
 POST   /api/cards/{cardID}/move
+PATCH  /api/cards/{cardID}/sprint
 
 GET    /api/cards/{cardID}/comments
 POST   /api/cards/{cardID}/comments
+
+GET    /api/planning?boardId={boardID}
+POST   /api/sprints
+POST   /api/sprints/{sprintID}/start
+POST   /api/sprints/{sprintID}/complete
 
 GET    /api/wiki
 POST   /api/wiki
@@ -289,6 +297,8 @@ GET    /healthz
 GET    /readyz
 ```
 
+`POST /api/sprints` requires `boardId`. `POST /api/sprints/{sprintID}/complete` accepts `rollover` decisions with `cardId` and an optional planned `sprintId`; cards omitted from rollover or sent with an empty `sprintId` return to backlog.
+
 ## Frontend Screens
 
 Initial screens:
@@ -296,6 +306,7 @@ Initial screens:
 - Login.
 - Workspace/board shell.
 - Kanban board.
+- Planning dashboard.
 - Card detail drawer or modal.
 - Wiki page list.
 - Wiki page editor.

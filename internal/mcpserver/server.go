@@ -68,7 +68,7 @@ type createCardInput struct {
 	Description   string `json:"description,omitempty" jsonschema:"Optional card description."`
 	Priority      string `json:"priority,omitempty" jsonschema:"Optional priority: low, normal, high, or urgent."`
 	OwnerInitials string `json:"ownerInitials,omitempty" jsonschema:"Optional owner initials."`
-	Due           string `json:"due,omitempty" jsonschema:"Optional human-readable due label."`
+	Due           string `json:"due,omitempty" jsonschema:"Optional due date in YYYY-MM-DD format."`
 }
 
 type updateCardInput struct {
@@ -77,7 +77,7 @@ type updateCardInput struct {
 	Description   string `json:"description" jsonschema:"Updated card description."`
 	Priority      string `json:"priority,omitempty" jsonschema:"Priority: low, normal, high, or urgent."`
 	OwnerInitials string `json:"ownerInitials,omitempty" jsonschema:"Owner initials."`
-	Due           string `json:"due,omitempty" jsonschema:"Human-readable due label."`
+	Due           string `json:"due,omitempty" jsonschema:"Due date in YYYY-MM-DD format."`
 }
 
 type moveCardInput struct {
@@ -143,7 +143,7 @@ func New(store Store) *sdkmcp.Server {
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "arqboard_create_card",
-		Description: "Create a card in a column, optionally setting description, priority, owner, and due label.",
+		Description: "Create a card in a column, optionally setting description, priority, owner, and due date.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input createCardInput) (*sdkmcp.CallToolResult, db.BoardCard, error) {
 		card, err := store.CreateCard(ctx, db.CreateCardParams{
 			ColumnID:      input.ColumnID,
@@ -153,20 +153,24 @@ func New(store Store) *sdkmcp.Server {
 		if err != nil || !createCardNeedsUpdate(input) {
 			return nil, card, err
 		}
+		due := strings.TrimSpace(input.Due)
+		if due == "" {
+			due = card.Due
+		}
 		card, err = store.UpdateCard(ctx, db.UpdateCardParams{
 			CardID:        card.ID,
 			Title:         input.Title,
 			Description:   input.Description,
 			Priority:      input.Priority,
 			OwnerInitials: input.OwnerInitials,
-			Due:           input.Due,
+			Due:           due,
 		})
 		return nil, card, err
 	})
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "arqboard_update_card",
-		Description: "Update card title, description, priority, owner, and due label.",
+		Description: "Update card title, description, priority, owner, and due date.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input updateCardInput) (*sdkmcp.CallToolResult, db.BoardCard, error) {
 		card, err := store.UpdateCard(ctx, db.UpdateCardParams{
 			CardID:        input.CardID,
