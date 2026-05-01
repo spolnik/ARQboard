@@ -3005,7 +3005,7 @@ function sortSprintPlans(plans: SprintPlan[]) {
   });
 }
 
-function sprintWindow(sprint: Sprint) {
+export function sprintWindow(sprint: Sprint) {
   if (sprint.startsOn && sprint.endsOn) {
     return `${sprint.startsOn} - ${sprint.endsOn}`;
   }

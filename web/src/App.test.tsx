@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
-import App, { resolveDragMoveTarget, resolveMoveTarget } from './App';
+import App, { resolveDragMoveTarget, resolveMoveTarget, sprintWindow } from './App';
 
 const userFixture = {
   id: 'user-1',
@@ -1145,6 +1145,24 @@ describe('App', () => {
       position: 1,
     });
     expect(resolveDragMoveTarget(board, 'card-1', 'card-1', ['card-1', 'missing-target'])).toBeNull();
+  });
+
+  it('formats sprint windows for complete and partial date ranges', () => {
+    const baseSprint = {
+      id: 'sprint-window',
+      workspaceId: 'workspace-1',
+      boardId: 'board-1',
+      name: 'Sprint window',
+      goal: '',
+      status: 'planned' as const,
+    };
+
+    expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01', endsOn: '2026-05-15' })).toBe(
+      '2026-05-01 - 2026-05-15',
+    );
+    expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01' })).toBe('Starts 2026-05-01');
+    expect(sprintWindow({ ...baseSprint, endsOn: '2026-05-15' })).toBe('Ends 2026-05-15');
+    expect(sprintWindow(baseSprint)).toBe('Dates not set');
   });
 
   it('filters cards and wiki pages with workspace search', async () => {

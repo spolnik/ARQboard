@@ -414,6 +414,68 @@ func TestRouterRejectsWorkspaceMemberManagementForNonAdmins(t *testing.T) {
 	}
 }
 
+func TestRouterValidatesWorkspaceMemberPayloads(t *testing.T) {
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: testUser()},
+		TeamStore: &fakeTeamStore{},
+	})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create member missing email", method: http.MethodPost, path: "/api/members", body: `{"password":"correct horse battery qa"}`},
+		{name: "create member bad json", method: http.MethodPost, path: "/api/members", body: `{`},
+		{name: "update member missing role", method: http.MethodPatch, path: "/api/members/member-2", body: `{}`},
+		{name: "update member bad json", method: http.MethodPatch, path: "/api/members/member-2", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestRouterMapsTeamStoreErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "validation", err: db.ErrValidation, want: http.StatusBadRequest},
+		{name: "not found", err: db.ErrNotFound, want: http.StatusNotFound},
+		{name: "database unavailable", err: db.ErrDatabaseUnavailable, want: http.StatusServiceUnavailable},
+		{name: "internal", err: errors.New("boom"), want: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := NewRouter(Options{
+				AuthStore: &fakeAuthStore{user: testUser()},
+				TeamStore: &fakeTeamStore{err: tt.err},
+			})
+			req := httptest.NewRequest(http.MethodGet, "/api/members", nil)
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != tt.want {
+				t.Fatalf("status = %d, want %d", res.Code, tt.want)
+			}
+		})
+	}
+}
+
 func TestRouterCreatesCards(t *testing.T) {
 	store := fakeBoardStore{
 		card: db.BoardCard{
@@ -796,6 +858,33 @@ func TestRouterManagesSprintPlanning(t *testing.T) {
 	router.ServeHTTP(complete, httptest.NewRequest(http.MethodPost, "/api/sprints/sprint-1/complete", bytes.NewBufferString(`{"rollover":[{"cardId":"card-1","sprintId":""}]}`)))
 	if complete.Code != http.StatusOK {
 		t.Fatalf("complete sprint status = %d, want %d", complete.Code, http.StatusOK)
+	}
+}
+
+func TestRouterValidatesSprintPlanningPayloads(t *testing.T) {
+	router := NewRouter(Options{BoardStore: fakeBoardStore{}})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create sprint bad json", method: http.MethodPost, path: "/api/sprints", body: `{`},
+		{name: "create sprint missing name", method: http.MethodPost, path: "/api/sprints", body: `{"boardId":"board-1"}`},
+		{name: "complete sprint bad json", method: http.MethodPost, path: "/api/sprints/sprint-1/complete", body: `{`},
+		{name: "assign card to sprint bad json", method: http.MethodPatch, path: "/api/cards/card-1/sprint", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body)))
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
 	}
 }
 
