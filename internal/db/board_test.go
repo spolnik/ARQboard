@@ -44,9 +44,8 @@ func TestDefaultBoardSeedsOnceAndPersistsCardMoves(t *testing.T) {
 	}
 
 	card, err := store.CreateCard(ctx, CreateCardParams{
-		ColumnID:      planned.ID,
-		Title:         "Run local smoke test",
-		OwnerInitials: "qa",
+		ColumnID: planned.ID,
+		Title:    "Run local smoke test",
 	})
 	if err != nil {
 		t.Fatalf("CreateCard returned error: %v", err)
@@ -64,8 +63,8 @@ func TestDefaultBoardSeedsOnceAndPersistsCardMoves(t *testing.T) {
 	if movedReview.Cards[0].Title != "Run local smoke test" {
 		t.Fatalf("first review card = %q, want moved card", movedReview.Cards[0].Title)
 	}
-	if movedReview.Cards[0].Owner != "QA" {
-		t.Fatalf("moved card owner = %q, want QA", movedReview.Cards[0].Owner)
+	if movedReview.Cards[0].Owner != "" {
+		t.Fatalf("moved card owner = %q, want empty legacy owner display", movedReview.Cards[0].Owner)
 	}
 
 	cleanup()
@@ -296,12 +295,11 @@ func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 	card := findColumn(t, board, "Planned").Cards[0]
 
 	updated, err := store.UpdateCard(ctx, UpdateCardParams{
-		CardID:        card.ID,
-		Title:         "Wire production auth flow",
-		Description:   "Document cookie boundaries and refresh behavior.",
-		Priority:      "urgent",
-		OwnerInitials: "qa",
-		Due:           "2026-05-09",
+		CardID:      card.ID,
+		Title:       "Wire production auth flow",
+		Description: "Document cookie boundaries and refresh behavior.",
+		Priority:    "urgent",
+		Due:         "2026-05-09",
 	})
 	if err != nil {
 		t.Fatalf("UpdateCard returned error: %v", err)
@@ -312,19 +310,15 @@ func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 	if updated.Priority != "Urgent" {
 		t.Fatalf("updated priority = %q, want Urgent", updated.Priority)
 	}
-	if updated.Owner != "QA" {
-		t.Fatalf("updated owner = %q, want QA", updated.Owner)
-	}
 	if updated.Due != "2026-05-09" {
 		t.Fatalf("updated due = %q, want 2026-05-09", updated.Due)
 	}
 	if _, err := store.UpdateCard(ctx, UpdateCardParams{
-		CardID:        card.ID,
-		Title:         "Wire production auth flow",
-		Description:   "Document cookie boundaries and refresh behavior.",
-		Priority:      "urgent",
-		OwnerInitials: "qa",
-		Due:           "Soon",
+		CardID:      card.ID,
+		Title:       "Wire production auth flow",
+		Description: "Document cookie boundaries and refresh behavior.",
+		Priority:    "urgent",
+		Due:         "Soon",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("UpdateCard fuzzy due error = %v, want ErrValidation", err)
 	}
@@ -362,6 +356,96 @@ func TestCardDetailUpdateCommentsAndActivityPersist(t *testing.T) {
 	}
 	if len(persisted.Comments) != 1 {
 		t.Fatalf("persisted comments = %d, want 1", len(persisted.Comments))
+	}
+}
+
+func TestCardsSupportWorkspaceAssigneesLabelsAndBoardFilterOptions(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+	teamStore := TeamStore{Conn: store.Conn}
+
+	board, err := store.GetDefaultBoard(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultBoard returned error: %v", err)
+	}
+	member, err := teamStore.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:       "qa@example.com",
+		DisplayName: "Quinn Analyst",
+		Password:    "correct horse battery qa",
+		Role:        "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspaceMember returned error: %v", err)
+	}
+
+	card, err := store.CreateCard(ctx, CreateCardParams{
+		ColumnID:   findColumn(t, board, "Planned").ID,
+		Title:      "Filter cards by people and labels",
+		AssigneeID: member.UserID,
+		LabelNames: []string{"Backend", "Risk", "backend"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCard returned error: %v", err)
+	}
+	if card.AssigneeID != member.UserID {
+		t.Fatalf("card.AssigneeID = %q, want %q", card.AssigneeID, member.UserID)
+	}
+	if card.AssigneeName != "Quinn Analyst" || card.Owner != "Quinn Analyst" {
+		t.Fatalf("card assignee display = (%q, %q), want Quinn Analyst", card.AssigneeName, card.Owner)
+	}
+	if got := labelNames(card.Labels); len(got) != 2 || got[0] != "Backend" || got[1] != "Risk" {
+		t.Fatalf("card labels = %#v, want Backend and Risk", got)
+	}
+
+	loaded, err := store.GetBoard(ctx, board.ID)
+	if err != nil {
+		t.Fatalf("GetBoard returned error: %v", err)
+	}
+	if len(loaded.Members) != 1 || loaded.Members[0].UserID != member.UserID {
+		t.Fatalf("loaded.Members = %#v, want assignee options", loaded.Members)
+	}
+	if got := labelNames(loaded.Labels); len(got) != 2 || got[0] != "Backend" || got[1] != "Risk" {
+		t.Fatalf("loaded.Labels = %#v, want board label options", got)
+	}
+
+	updated, err := store.UpdateCard(ctx, UpdateCardParams{
+		CardID:      card.ID,
+		Title:       "Filter cards by people and labels",
+		Description: "Use structured card metadata for focused board views.",
+		Priority:    "high",
+		AssigneeID:  stringPtr(""),
+		Due:         "2026-05-20",
+		LabelNames:  []string{"Frontend"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateCard returned error: %v", err)
+	}
+	if updated.AssigneeID != "" || updated.AssigneeName != "" {
+		t.Fatalf("updated assignee = (%q, %q), want cleared", updated.AssigneeID, updated.AssigneeName)
+	}
+	if got := labelNames(updated.Labels); len(got) != 1 || got[0] != "Frontend" {
+		t.Fatalf("updated labels = %#v, want Frontend", got)
+	}
+}
+
+func TestCardsRejectAssigneesOutsideTheWorkspace(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	board, err := store.GetDefaultBoard(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultBoard returned error: %v", err)
+	}
+	if _, err := store.CreateCard(ctx, CreateCardParams{
+		ColumnID:   findColumn(t, board, "Planned").ID,
+		Title:      "Invalid assignee should fail",
+		AssigneeID: "00000000-0000-0000-0000-000000000001",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("CreateCard invalid assignee error = %v, want ErrValidation", err)
 	}
 }
 
@@ -796,9 +880,6 @@ func TestBoardHelpers(t *testing.T) {
 	if _, err := normalizePriority("blocker"); !errors.Is(err, ErrValidation) {
 		t.Fatalf("normalizePriority invalid error = %v, want ErrValidation", err)
 	}
-	if ownerInitials("team") != "TEA" {
-		t.Fatalf("ownerInitials truncated incorrectly")
-	}
 	if displayPriority("low") != "Low" || displayPriority("high") != "High" || displayPriority("urgent") != "Urgent" {
 		t.Fatalf("displayPriority did not format explicit priorities")
 	}
@@ -866,4 +947,16 @@ func hasActivity(events []ActivityEvent, eventType string) bool {
 		}
 	}
 	return false
+}
+
+func labelNames(labels []CardLabel) []string {
+	names := make([]string, 0, len(labels))
+	for _, label := range labels {
+		names = append(names, label.Name)
+	}
+	return names
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

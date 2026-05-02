@@ -13,11 +13,15 @@ var ErrNotFound = errors.New("not found")
 var ErrValidation = errors.New("validation failed")
 
 type Board struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
-	Slug      string        `json:"slug"`
-	Columns   []BoardColumn `json:"columns"`
-	WikiPages []WikiPage    `json:"wikiPages"`
+	ID          string            `json:"id"`
+	WorkspaceID string            `json:"workspaceId"`
+	TeamID      string            `json:"teamId"`
+	Name        string            `json:"name"`
+	Slug        string            `json:"slug"`
+	Members     []WorkspaceMember `json:"members"`
+	Labels      []CardLabel       `json:"labels"`
+	Columns     []BoardColumn     `json:"columns"`
+	WikiPages   []WikiPage        `json:"wikiPages"`
 }
 
 type Workspace struct {
@@ -29,6 +33,7 @@ type Workspace struct {
 type BoardSummary struct {
 	ID          string `json:"id"`
 	WorkspaceID string `json:"workspaceId"`
+	TeamID      string `json:"teamId"`
 	Name        string `json:"name"`
 	Slug        string `json:"slug"`
 	ColumnCount int    `json:"columnCount"`
@@ -43,15 +48,28 @@ type BoardColumn struct {
 }
 
 type BoardCard struct {
+	ID            string      `json:"id"`
+	ColumnID      string      `json:"columnId"`
+	BoardID       string      `json:"boardId"`
+	BoardName     string      `json:"boardName,omitempty"`
+	SprintID      string      `json:"sprintId,omitempty"`
+	Title         string      `json:"title"`
+	Description   string      `json:"description"`
+	Owner         string      `json:"owner"`
+	AssigneeID    string      `json:"assigneeId"`
+	AssigneeName  string      `json:"assigneeName"`
+	AssigneeEmail string      `json:"assigneeEmail"`
+	Labels        []CardLabel `json:"labels"`
+	Priority      string      `json:"priority"`
+	Due           string      `json:"due"`
+	Position      int         `json:"position"`
+}
+
+type CardLabel struct {
 	ID          string `json:"id"`
-	ColumnID    string `json:"columnId"`
-	SprintID    string `json:"sprintId,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Owner       string `json:"owner"`
-	Priority    string `json:"priority"`
-	Due         string `json:"due"`
-	Position    int    `json:"position"`
+	WorkspaceID string `json:"workspaceId"`
+	Name        string `json:"name"`
+	Color       string `json:"color"`
 }
 
 type WikiPage struct {
@@ -83,18 +101,20 @@ type ActivityEvent struct {
 }
 
 type CreateCardParams struct {
-	ColumnID      string
-	Title         string
-	OwnerInitials string
+	ColumnID   string
+	Title      string
+	AssigneeID string
+	LabelNames []string
 }
 
 type UpdateCardParams struct {
-	CardID        string
-	Title         string
-	Description   string
-	Priority      string
-	OwnerInitials string
-	Due           string
+	CardID      string
+	Title       string
+	Description string
+	Priority    string
+	AssigneeID  *string
+	Due         string
+	LabelNames  []string
 }
 
 type MoveCardParams struct {
@@ -104,7 +124,8 @@ type MoveCardParams struct {
 }
 
 type CreateBoardParams struct {
-	Name string
+	Name   string
+	TeamID string
 }
 
 type CreateColumnParams struct {
@@ -308,6 +329,7 @@ func (store BoardStore) ListBoards(ctx context.Context) ([]BoardSummary, error) 
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s,
 			%s,
+			%s,
 			boards.name,
 			boards.slug,
 			COUNT(DISTINCT columns.id) AS column_count,
@@ -315,11 +337,12 @@ func (store BoardStore) ListBoards(ctx context.Context) ([]BoardSummary, error) 
 		FROM boards
 		LEFT JOIN columns ON columns.board_id = boards.id
 		LEFT JOIN cards ON cards.board_id = boards.id
-		GROUP BY boards.id, boards.workspace_id, boards.name, boards.slug, boards.created_at
+		GROUP BY boards.id, boards.workspace_id, boards.team_id, boards.name, boards.slug, boards.created_at
 		ORDER BY boards.name, boards.created_at, boards.id
 	`,
 		idText(driver, "boards.id"),
 		idText(driver, "boards.workspace_id"),
+		idText(driver, "boards.team_id"),
 	))
 	if err != nil {
 		return nil, err
@@ -329,7 +352,7 @@ func (store BoardStore) ListBoards(ctx context.Context) ([]BoardSummary, error) 
 	boards := make([]BoardSummary, 0)
 	for rows.Next() {
 		var board BoardSummary
-		if err := rows.Scan(&board.ID, &board.WorkspaceID, &board.Name, &board.Slug, &board.ColumnCount, &board.CardCount); err != nil {
+		if err := rows.Scan(&board.ID, &board.WorkspaceID, &board.TeamID, &board.Name, &board.Slug, &board.ColumnCount, &board.CardCount); err != nil {
 			return nil, err
 		}
 		boards = append(boards, board)
@@ -379,6 +402,21 @@ func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParam
 	if err != nil {
 		return Board{}, err
 	}
+	teamID := strings.TrimSpace(params.TeamID)
+	if teamID == "" {
+		teamID, err = ensureDefaultTeam(ctx, tx, driver, workspaceID)
+		if err != nil {
+			return Board{}, err
+		}
+	} else {
+		teamWorkspaceID, err := loadTeamWorkspace(ctx, tx, driver, teamID)
+		if err != nil {
+			return Board{}, err
+		}
+		if teamWorkspaceID != workspaceID {
+			return Board{}, fmt.Errorf("%w: team must belong to the default workspace", ErrValidation)
+		}
+	}
 	boardID, err := newID()
 	if err != nil {
 		return Board{}, err
@@ -389,15 +427,16 @@ func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParam
 	}
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO boards (id, workspace_id, name, slug, description)
-		VALUES (%s, %s, %s, %s, %s)
+		INSERT INTO boards (id, workspace_id, team_id, name, slug, description)
+		VALUES (%s, %s, %s, %s, %s, %s)
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
 		placeholder(driver, 3),
 		placeholder(driver, 4),
 		placeholder(driver, 5),
-	), boardID, workspaceID, name, slug, "")
+		placeholder(driver, 6),
+	), boardID, workspaceID, teamID, name, slug, "")
 	if err != nil {
 		return Board{}, err
 	}
@@ -552,6 +591,9 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 	`, placeholder(driver, 1)), columnID).Scan(&boardID, &workspaceID); err != nil {
 		return BoardCard{}, notFoundOrErr(err)
 	}
+	if err := ensureAdminWorkspaceMembers(ctx, tx, driver, workspaceID); err != nil {
+		return BoardCard{}, err
+	}
 
 	var position int
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COALESCE(MAX(position), -1) + 1 FROM cards WHERE column_id = %s", placeholder(driver, 1)), columnID).Scan(&position); err != nil {
@@ -567,9 +609,13 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 	if err != nil {
 		return BoardCard{}, err
 	}
+	assigneeID, err := validateCardAssignee(ctx, tx, driver, workspaceID, params.AssigneeID)
+	if err != nil {
+		return BoardCard{}, err
+	}
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO cards (id, board_id, column_id, sprint_id, title, description, priority, position, owner_initials, due_at, due_label)
+		INSERT INTO cards (id, board_id, column_id, sprint_id, assignee_id, title, description, priority, position, due_at, due_label)
 		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '')
 	`,
 		placeholder(driver, 1),
@@ -582,8 +628,11 @@ func (store BoardStore) CreateCard(ctx context.Context, params CreateCardParams)
 		placeholder(driver, 8),
 		placeholder(driver, 9),
 		placeholder(driver, 10),
-	), cardID, boardID, columnID, sprintID, title, "New card created locally and persisted in the board database.", "normal", position, ownerInitials(params.OwnerInitials), due)
+	), cardID, boardID, columnID, sprintID, nullString(assigneeID), title, "New card created locally and persisted in the board database.", "normal", position, due)
 	if err != nil {
+		return BoardCard{}, err
+	}
+	if err := replaceCardLabels(ctx, tx, driver, workspaceID, cardID, params.LabelNames); err != nil {
 		return BoardCard{}, err
 	}
 	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, cardID, "card.created"); err != nil {
@@ -661,13 +710,15 @@ func (store BoardStore) UpdateCard(ctx context.Context, params UpdateCardParams)
 	if err != nil {
 		return BoardCard{}, err
 	}
+	if err := ensureAdminWorkspaceMembers(ctx, tx, driver, workspaceID); err != nil {
+		return BoardCard{}, err
+	}
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE cards
 		SET title = %s,
 			description = %s,
 			priority = %s,
-			owner_initials = %s,
 			due_at = %s,
 			due_label = '',
 			updated_at = %s
@@ -677,12 +728,31 @@ func (store BoardStore) UpdateCard(ctx context.Context, params UpdateCardParams)
 		placeholder(driver, 2),
 		placeholder(driver, 3),
 		placeholder(driver, 4),
-		placeholder(driver, 5),
 		currentTimestamp(driver),
-		placeholder(driver, 6),
-	), title, strings.TrimSpace(params.Description), priority, ownerInitials(params.OwnerInitials), due, cardID)
+		placeholder(driver, 5),
+	), title, strings.TrimSpace(params.Description), priority, due, cardID)
 	if err != nil {
 		return BoardCard{}, err
+	}
+	if params.AssigneeID != nil {
+		assigneeID, err := validateCardAssignee(ctx, tx, driver, workspaceID, *params.AssigneeID)
+		if err != nil {
+			return BoardCard{}, err
+		}
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE cards
+			SET assignee_id = %s,
+				updated_at = %s
+			WHERE id = %s
+		`, placeholder(driver, 1), currentTimestamp(driver), placeholder(driver, 2)), nullString(assigneeID), cardID)
+		if err != nil {
+			return BoardCard{}, err
+		}
+	}
+	if params.LabelNames != nil {
+		if err := replaceCardLabels(ctx, tx, driver, workspaceID, cardID, params.LabelNames); err != nil {
+			return BoardCard{}, err
+		}
 	}
 	if err := appendActivity(ctx, tx, driver, workspaceID, boardID, cardID, "card.updated"); err != nil {
 		return BoardCard{}, err
@@ -1017,6 +1087,9 @@ func ensureDefaultBoard(ctx context.Context, q sqlQueryer, driver Driver) (strin
 	if err != nil {
 		return "", err
 	}
+	if _, err := ensureDefaultTeam(ctx, q, driver, workspaceID); err != nil {
+		return "", err
+	}
 
 	boardID, err := ensureBoard(ctx, q, driver, workspaceID)
 	if err != nil {
@@ -1071,12 +1144,20 @@ func ensureWorkspace(ctx context.Context, q sqlQueryer, driver Driver) (string, 
 }
 
 func ensureBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string) (string, error) {
+	teamID, err := ensureDefaultTeam(ctx, q, driver, workspaceID)
+	if err != nil {
+		return "", err
+	}
 	id, found, err := lookupID(ctx, q, driver, fmt.Sprintf(
 		"SELECT id FROM boards WHERE workspace_id = %s AND slug = %s",
 		placeholder(driver, 1),
 		placeholder(driver, 2),
 	), workspaceID, "platform")
-	if err != nil || found {
+	if err != nil {
+		return "", err
+	}
+	if found {
+		_, err = q.ExecContext(ctx, fmt.Sprintf("UPDATE boards SET team_id = %s WHERE id = %s AND team_id IS NULL", placeholder(driver, 1), placeholder(driver, 2)), teamID, id)
 		return id, err
 	}
 
@@ -1085,13 +1166,14 @@ func ensureBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID s
 		return "", err
 	}
 	_, err = q.ExecContext(ctx, fmt.Sprintf(
-		"INSERT INTO boards (id, workspace_id, name, slug, description) VALUES (%s, %s, %s, %s, %s)",
+		"INSERT INTO boards (id, workspace_id, team_id, name, slug, description) VALUES (%s, %s, %s, %s, %s, %s)",
 		placeholder(driver, 1),
 		placeholder(driver, 2),
 		placeholder(driver, 3),
 		placeholder(driver, 4),
 		placeholder(driver, 5),
-	), id, workspaceID, "Platform Board", "platform", "Default ARQboard workspace board.")
+		placeholder(driver, 6),
+	), id, workspaceID, teamID, "Platform Board", "platform", "Default ARQboard workspace board.")
 	return id, err
 }
 
@@ -1283,15 +1365,18 @@ func seedWikiPages(ctx context.Context, q sqlQueryer, driver Driver, workspaceID
 
 func loadBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (Board, error) {
 	var board Board
-	if err := q.QueryRowContext(ctx, fmt.Sprintf("SELECT id, name, slug FROM boards WHERE id = %s", placeholder(driver, 1)), boardID).Scan(&board.ID, &board.Name, &board.Slug); err != nil {
+	if err := q.QueryRowContext(ctx, fmt.Sprintf("SELECT id, workspace_id, team_id, name, slug FROM boards WHERE id = %s", placeholder(driver, 1)), boardID).Scan(&board.ID, &board.WorkspaceID, &board.TeamID, &board.Name, &board.Slug); err != nil {
 		return Board{}, notFoundOrErr(err)
+	}
+	if err := ensureAdminWorkspaceMembers(ctx, q, driver, board.WorkspaceID); err != nil {
+		return Board{}, err
 	}
 
 	columns, err := loadColumns(ctx, q, driver, boardID)
 	if err != nil {
 		return Board{}, err
 	}
-	activeSprintID, found, err := activeSprintIDForBoard(ctx, q, driver, boardID)
+	activeSprintID, found, err := activeSprintIDForTeam(ctx, q, driver, board.TeamID)
 	if err != nil {
 		return Board{}, err
 	}
@@ -1306,6 +1391,17 @@ func loadBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string)
 		columns[index].Cards = cardsByColumn[columns[index].ID]
 	}
 	board.Columns = columns
+	members, err := listWorkspaceMembers(ctx, q, driver, board.WorkspaceID)
+	if err != nil {
+		return Board{}, err
+	}
+	board.Members = members
+
+	labels, err := loadWorkspaceLabels(ctx, q, driver, board.WorkspaceID)
+	if err != nil {
+		return Board{}, err
+	}
+	board.Labels = labels
 
 	wikiPages, err := loadWikiPages(ctx, q, driver, boardID)
 	if err != nil {
@@ -1342,26 +1438,35 @@ func loadColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID strin
 
 func loadCardsByColumn(ctx context.Context, q sqlQueryer, driver Driver, boardID string, sprintID string) (map[string][]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, column_id, sprint_id, title, description, owner_initials, priority, position, %s
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
-		WHERE board_id = %s AND sprint_id = %s
-		ORDER BY position, created_at, id
-	`, cardDueText(driver), placeholder(driver, 1), placeholder(driver, 2)), boardID, sprintID)
+		LEFT JOIN users ON users.id = cards.assignee_id
+		WHERE cards.board_id = %s AND cards.sprint_id = %s
+		ORDER BY cards.position, cards.created_at, cards.id
+	`, idText(driver, "cards.board_id"), cardDueText(driver), idText(driver, "cards.assignee_id"), placeholder(driver, 1), placeholder(driver, 2)), boardID, sprintID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	cardsByColumn := make(map[string][]BoardCard)
+	cards := make([]BoardCard, 0)
 	for rows.Next() {
 		card, err := scanCard(rows)
 		if err != nil {
 			return nil, err
 		}
-		cardsByColumn[card.ColumnID] = append(cardsByColumn[card.ColumnID], card)
+		cards = append(cards, card)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := attachLabelsToCards(ctx, q, driver, cards); err != nil {
+		return nil, err
+	}
+	cardsByColumn := make(map[string][]BoardCard)
+	for _, card := range cards {
+		cardsByColumn[card.ColumnID] = append(cardsByColumn[card.ColumnID], card)
 	}
 	return cardsByColumn, nil
 }
@@ -1480,15 +1585,22 @@ func loadCardActivity(ctx context.Context, q sqlQueryer, driver Driver, cardID s
 
 func loadCard(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (BoardCard, error) {
 	row := q.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, column_id, sprint_id, title, description, owner_initials, priority, position, %s
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
-		WHERE id = %s
-	`, cardDueText(driver), placeholder(driver, 1)), cardID)
+		LEFT JOIN users ON users.id = cards.assignee_id
+		WHERE cards.id = %s
+	`, idText(driver, "cards.board_id"), cardDueText(driver), idText(driver, "cards.assignee_id"), placeholder(driver, 1)), cardID)
 
 	card, err := scanCard(row)
 	if err != nil {
 		return BoardCard{}, notFoundOrErr(err)
 	}
+	labels, err := loadCardLabels(ctx, q, driver, card.ID)
+	if err != nil {
+		return BoardCard{}, err
+	}
+	card.Labels = labels
 	return card, nil
 }
 
@@ -1558,13 +1670,228 @@ func scanCard(scanner cardScanner) (BoardCard, error) {
 	var card BoardCard
 	var priority string
 	var sprintID sql.NullString
-	if err := scanner.Scan(&card.ID, &card.ColumnID, &sprintID, &card.Title, &card.Description, &card.Owner, &priority, &card.Position, &card.Due); err != nil {
+	var assigneeID sql.NullString
+	var assigneeName sql.NullString
+	var assigneeEmail sql.NullString
+	if err := scanner.Scan(
+		&card.ID,
+		&card.ColumnID,
+		&card.BoardID,
+		&card.BoardName,
+		&sprintID,
+		&card.Title,
+		&card.Description,
+		&card.Owner,
+		&priority,
+		&card.Position,
+		&card.Due,
+		&assigneeID,
+		&assigneeName,
+		&assigneeEmail,
+	); err != nil {
 		return BoardCard{}, err
 	}
 	card.SprintID = sprintID.String
-	card.Owner = ownerInitials(card.Owner)
+	card.AssigneeID = assigneeID.String
+	card.AssigneeName = assigneeName.String
+	card.AssigneeEmail = assigneeEmail.String
+	if card.AssigneeID != "" {
+		card.Owner = card.AssigneeName
+		if card.Owner == "" {
+			card.Owner = card.AssigneeEmail
+		}
+	} else {
+		card.Owner = ""
+	}
 	card.Priority = displayPriority(priority)
+	card.Labels = []CardLabel{}
 	return card, nil
+}
+
+func loadWorkspaceLabels(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string) ([]CardLabel, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s, %s, name, color
+		FROM labels
+		WHERE workspace_id = %s
+		ORDER BY lower(name), id
+	`, idText(driver, "id"), idText(driver, "workspace_id"), placeholder(driver, 1)), workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	labels := make([]CardLabel, 0)
+	for rows.Next() {
+		var label CardLabel
+		if err := rows.Scan(&label.ID, &label.WorkspaceID, &label.Name, &label.Color); err != nil {
+			return nil, err
+		}
+		labels = append(labels, label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return labels, nil
+}
+
+func loadCardLabels(ctx context.Context, q sqlQueryer, driver Driver, cardID string) ([]CardLabel, error) {
+	cards := []BoardCard{{ID: cardID}}
+	if err := attachLabelsToCards(ctx, q, driver, cards); err != nil {
+		return nil, err
+	}
+	return cards[0].Labels, nil
+}
+
+func attachLabelsToCards(ctx context.Context, q sqlQueryer, driver Driver, cards []BoardCard) error {
+	if len(cards) == 0 {
+		return nil
+	}
+	cardIDs := make([]string, 0, len(cards))
+	seen := make(map[string]bool)
+	for _, card := range cards {
+		if card.ID == "" || seen[card.ID] {
+			continue
+		}
+		seen[card.ID] = true
+		cardIDs = append(cardIDs, card.ID)
+	}
+	if len(cardIDs) == 0 {
+		return nil
+	}
+
+	args := make([]any, len(cardIDs))
+	for index, cardID := range cardIDs {
+		args[index] = cardID
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s, %s, %s, labels.name, labels.color
+		FROM card_labels
+		JOIN labels ON labels.id = card_labels.label_id
+		WHERE card_labels.card_id IN (%s)
+		ORDER BY lower(labels.name), labels.id
+	`,
+		idText(driver, "card_labels.card_id"),
+		idText(driver, "labels.id"),
+		idText(driver, "labels.workspace_id"),
+		placeholders(driver, len(cardIDs)),
+	), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	labelsByCard := make(map[string][]CardLabel)
+	for rows.Next() {
+		var cardID string
+		var label CardLabel
+		if err := rows.Scan(&cardID, &label.ID, &label.WorkspaceID, &label.Name, &label.Color); err != nil {
+			return err
+		}
+		labelsByCard[cardID] = append(labelsByCard[cardID], label)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for index := range cards {
+		cards[index].Labels = labelsByCard[cards[index].ID]
+		if cards[index].Labels == nil {
+			cards[index].Labels = []CardLabel{}
+		}
+	}
+	return nil
+}
+
+func replaceCardLabels(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, cardID string, names []string) error {
+	_, err := q.ExecContext(ctx, fmt.Sprintf("DELETE FROM card_labels WHERE card_id = %s", placeholder(driver, 1)), cardID)
+	if err != nil {
+		return err
+	}
+
+	labels, err := ensureLabels(ctx, q, driver, workspaceID, names)
+	if err != nil {
+		return err
+	}
+	for _, label := range labels {
+		cardLabelID, err := newID()
+		if err != nil {
+			return err
+		}
+		_, err = q.ExecContext(ctx, fmt.Sprintf(`
+			INSERT INTO card_labels (id, card_id, label_id)
+			VALUES (%s, %s, %s)
+		`, placeholder(driver, 1), placeholder(driver, 2), placeholder(driver, 3)), cardLabelID, cardID, label.ID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureLabels(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, names []string) ([]CardLabel, error) {
+	normalized := normalizeLabelNames(names)
+	labels := make([]CardLabel, 0, len(normalized))
+	for _, name := range normalized {
+		labelID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
+			SELECT id FROM labels
+			WHERE workspace_id = %s AND lower(name) = %s
+		`, placeholder(driver, 1), placeholder(driver, 2)), workspaceID, strings.ToLower(name))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			labelID, err = newID()
+			if err != nil {
+				return nil, err
+			}
+			_, err = q.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO labels (id, workspace_id, name, color)
+				VALUES (%s, %s, %s, %s)
+			`, placeholder(driver, 1), placeholder(driver, 2), placeholder(driver, 3), placeholder(driver, 4)), labelID, workspaceID, name, labelColor(name))
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		label, err := loadLabel(ctx, q, driver, labelID)
+		if err != nil {
+			return nil, err
+		}
+		labels = append(labels, label)
+	}
+	return labels, nil
+}
+
+func loadLabel(ctx context.Context, q sqlQueryer, driver Driver, labelID string) (CardLabel, error) {
+	var label CardLabel
+	err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT %s, %s, name, color
+		FROM labels
+		WHERE id = %s
+	`, idText(driver, "id"), idText(driver, "workspace_id"), placeholder(driver, 1)), labelID).Scan(&label.ID, &label.WorkspaceID, &label.Name, &label.Color)
+	if err != nil {
+		return CardLabel{}, notFoundOrErr(err)
+	}
+	return label, nil
+}
+
+func validateCardAssignee(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, assigneeID string) (string, error) {
+	assigneeID = strings.TrimSpace(assigneeID)
+	if assigneeID == "" {
+		return "", nil
+	}
+
+	var userID string
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM workspace_members
+		WHERE workspace_id = %s AND user_id = %s
+	`, idText(driver, "user_id"), placeholder(driver, 1), placeholder(driver, 2)), workspaceID, assigneeID).Scan(&userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: assignee must be a workspace member", ErrValidation)
+		}
+		return "", err
+	}
+	return userID, nil
 }
 
 func lookupID(ctx context.Context, q sqlQueryer, _ Driver, query string, args ...any) (string, bool, error) {
@@ -1596,15 +1923,44 @@ func removeCardID(cardIDs []string, target string) []string {
 	return next
 }
 
-func ownerInitials(value string) string {
-	owner := strings.ToUpper(strings.TrimSpace(value))
-	if owner == "" {
-		return "ME"
+func normalizeLabelNames(names []string) []string {
+	normalized := make([]string, 0, len(names))
+	seen := make(map[string]bool)
+	for _, raw := range names {
+		for _, part := range strings.Split(raw, ",") {
+			name := strings.TrimSpace(part)
+			if name == "" {
+				continue
+			}
+			if len(name) > 40 {
+				name = name[:40]
+			}
+			key := strings.ToLower(name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			normalized = append(normalized, name)
+		}
 	}
-	if len(owner) > 3 {
-		return owner[:3]
+	return normalized
+}
+
+func labelColor(name string) string {
+	palette := []string{"#0f766e", "#2563eb", "#7c3aed", "#be123c", "#b45309", "#4d7c0f", "#0369a1", "#6d28d9"}
+	hash := 0
+	for _, char := range strings.ToLower(name) {
+		hash = (hash*31 + int(char)) % len(palette)
 	}
-	return owner
+	return palette[hash]
+}
+
+func nullString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func normalizePriority(value string) (string, error) {
@@ -1788,4 +2144,12 @@ func placeholder(driver Driver, index int) string {
 		return fmt.Sprintf("$%d", index)
 	}
 	return "?"
+}
+
+func placeholders(driver Driver, count int) string {
+	values := make([]string, 0, count)
+	for index := 1; index <= count; index++ {
+		values = append(values, placeholder(driver, index))
+	}
+	return strings.Join(values, ", ")
 }

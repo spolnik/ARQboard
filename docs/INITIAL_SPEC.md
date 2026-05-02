@@ -172,13 +172,13 @@ sprints
 card_comments
 activity_events
 wiki_pages
+labels
+card_labels
 ```
 
 Planned later tables:
 
 ```txt
-labels
-card_labels
 attachments
 integrations
 api_tokens
@@ -210,8 +210,9 @@ Each card should support:
 - Title.
 - Description.
 - Status via column placement.
-- Assignee.
+- Assignee as a named workspace member. User display names are required separately from email addresses and are the primary assignee label in card boxes.
 - Priority.
+- Labels.
 - Sort position.
 - Due date.
 - Created/updated timestamps.
@@ -251,7 +252,7 @@ Possible later features:
 
 Use JSON over HTTP under `/api`.
 
-Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, movement, sprint planning, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
+Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, member assignees, labels, board filters, movement, sprint planning, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
 
 Suggested endpoints:
 
@@ -306,6 +307,7 @@ Initial screens:
 - Login.
 - Workspace/board shell.
 - Kanban board.
+- Board filter toolbar for assignee, label, priority, due status, and text search.
 - Planning dashboard.
 - Card detail drawer or modal.
 - Wiki page list.

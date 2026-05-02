@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/spolnik/arqboard/migrations"
@@ -24,14 +25,23 @@ func TestValidateAdminUserRejectsInvalidInput(t *testing.T) {
 		{
 			name: "short password",
 			params: CreateAdminUserParams{
-				Email:    "admin@example.com",
-				Password: "short",
+				Email:       "admin@example.com",
+				Password:    "short",
+				DisplayName: "Admin",
 			},
 		},
 		{
 			name: "invalid email",
 			params: CreateAdminUserParams{
-				Email:    "admin",
+				Email:       "admin",
+				Password:    "correct horse battery staple",
+				DisplayName: "Admin",
+			},
+		},
+		{
+			name: "missing display name",
+			params: CreateAdminUserParams{
+				Email:    "admin@example.com",
 				Password: "correct horse battery staple",
 			},
 		},
@@ -49,8 +59,9 @@ func TestValidateAdminUserRejectsInvalidInput(t *testing.T) {
 
 func TestCreateAdminUserRequiresPool(t *testing.T) {
 	_, err := CreateAdminUser(context.Background(), nil, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "correct horse battery staple",
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	})
 	if !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("error = %v, want ErrDatabaseUnavailable", err)
@@ -59,8 +70,9 @@ func TestCreateAdminUserRequiresPool(t *testing.T) {
 
 func TestCreateAdminUserRejectsUnsupportedConnection(t *testing.T) {
 	_, err := CreateAdminUser(context.Background(), &Connection{Driver: DriverUnknown}, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "correct horse battery staple",
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	})
 	if !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("error = %v, want ErrDatabaseUnavailable", err)
@@ -84,8 +96,9 @@ func TestSQLiteMigrationAndAdminUser(t *testing.T) {
 	defer conn.Close()
 
 	userID, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
-		Email:    "Admin@Example.com",
-		Password: "correct horse battery staple",
+		Email:       "Admin@Example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	})
 	if err != nil {
 		t.Fatalf("CreateAdminUser returned error: %v", err)
@@ -107,11 +120,62 @@ func TestSQLiteMigrationAndAdminUser(t *testing.T) {
 	}
 
 	_, err = CreateAdminUser(ctx, conn, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "correct horse battery staple",
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	})
 	if !errors.Is(err, ErrUserExists) {
 		t.Fatalf("duplicate CreateAdminUser error = %v, want ErrUserExists", err)
+	}
+}
+
+func TestSQLiteMigrationBackfillsEmailDisplayNames(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	sqliteMigrations, err := migrations.ForDriver(string(DriverSQLite))
+	if err != nil {
+		t.Fatalf("ForDriver returned error: %v", err)
+	}
+	priorMigrations := fstest.MapFS{
+		"00001_initial_schema.sql":               mustReadMigration(t, sqliteMigrations, "00001_initial_schema.sql"),
+		"00002_sprint_planning.sql":              mustReadMigration(t, sqliteMigrations, "00002_sprint_planning.sql"),
+		"00003_card_due_dates.sql":               mustReadMigration(t, sqliteMigrations, "00003_card_due_dates.sql"),
+		"00004_remaining_due_label_backfill.sql": mustReadMigration(t, sqliteMigrations, "00004_remaining_due_label_backfill.sql"),
+		"00005_board_scoped_sprints.sql":         mustReadMigration(t, sqliteMigrations, "00005_board_scoped_sprints.sql"),
+		"00006_labels_and_assignees.sql":         mustReadMigration(t, sqliteMigrations, "00006_labels_and_assignees.sql"),
+	}
+	if err := MigrateUp(ctx, databaseURL, priorMigrations); err != nil {
+		t.Fatalf("prior MigrateUp returned error: %v", err)
+	}
+
+	conn, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	_, err = conn.SQL.ExecContext(ctx, `
+		INSERT INTO users (id, email, password_hash, display_name, is_admin)
+		VALUES ('user-1', 'admin@example.com', 'hash', 'admin@example.com', 1)
+	`)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("seed email display name returned error: %v", err)
+	}
+
+	if err := MigrateUp(ctx, databaseURL, sqliteMigrations); err != nil {
+		t.Fatalf("full MigrateUp returned error: %v", err)
+	}
+
+	conn, err = Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("reopen returned error: %v", err)
+	}
+	defer conn.Close()
+	var displayName string
+	if err := conn.SQL.QueryRowContext(ctx, "SELECT display_name FROM users WHERE id = 'user-1'").Scan(&displayName); err != nil {
+		t.Fatalf("query display name returned error: %v", err)
+	}
+	if displayName != "admin" {
+		t.Fatalf("displayName = %q, want admin", displayName)
 	}
 }
 
@@ -179,8 +243,9 @@ func TestAuthStoreRejectsInvalidCredentials(t *testing.T) {
 	defer conn.Close()
 
 	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "correct horse battery staple",
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	}); err != nil {
 		t.Fatalf("CreateAdminUser returned error: %v", err)
 	}
@@ -207,8 +272,9 @@ func TestAuthStorePreservesPasswordWhitespace(t *testing.T) {
 	defer conn.Close()
 
 	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "  correct horse battery staple  ",
+		Email:       "admin@example.com",
+		Password:    "  correct horse battery staple  ",
+		DisplayName: "Admin",
 	}); err != nil {
 		t.Fatalf("CreateAdminUser returned error: %v", err)
 	}
@@ -234,8 +300,9 @@ func TestAuthStoreExpiresSessions(t *testing.T) {
 	defer conn.Close()
 
 	if _, err := CreateAdminUser(ctx, conn, CreateAdminUserParams{
-		Email:    "admin@example.com",
-		Password: "correct horse battery staple",
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
 	}); err != nil {
 		t.Fatalf("CreateAdminUser returned error: %v", err)
 	}

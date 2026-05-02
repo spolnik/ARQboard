@@ -482,13 +482,12 @@ func TestRouterCreatesCards(t *testing.T) {
 			ID:       "card-new",
 			ColumnID: "column-planned",
 			Title:    "Run smoke test",
-			Owner:    "QA",
 			Priority: "Normal",
 			Due:      "2026-05-08",
 		},
 	}
 	router := NewRouter(Options{BoardStore: store})
-	body := bytes.NewBufferString(`{"columnId":"column-planned","title":"Run smoke test","ownerInitials":"qa"}`)
+	body := bytes.NewBufferString(`{"columnId":"column-planned","title":"Run smoke test"}`)
 
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/cards", body))
@@ -530,9 +529,9 @@ func TestRouterMovesCards(t *testing.T) {
 
 func TestRouterUpdatesCardsAndCreatesComments(t *testing.T) {
 	router := NewRouter(Options{BoardStore: fakeBoardStore{
-		card: db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "2026-05-09"},
+		card: db.BoardCard{ID: "card-1", Title: "Updated card", AssigneeName: "Quinn Analyst", Priority: "High", Due: "2026-05-09"},
 		detail: db.CardDetail{
-			Card:     db.BoardCard{ID: "card-1", Title: "Updated card", Owner: "QA", Priority: "High", Due: "2026-05-09"},
+			Card:     db.BoardCard{ID: "card-1", Title: "Updated card", AssigneeName: "Quinn Analyst", Priority: "High", Due: "2026-05-09"},
 			Comments: []db.CardComment{{ID: "comment-1", CardID: "card-1", Body: "Looks good"}},
 			Activity: []db.ActivityEvent{{ID: "event-1", CardID: "card-1", EventType: "card.commented"}},
 		},
@@ -543,7 +542,6 @@ func TestRouterUpdatesCardsAndCreatesComments(t *testing.T) {
 		"title":"Updated card",
 		"description":"Updated body",
 		"priority":"high",
-		"ownerInitials":"qa",
 		"due":"2026-05-09"
 	}`)))
 
@@ -914,6 +912,9 @@ type fakeAuthStore struct {
 }
 
 type fakeTeamStore struct {
+	teams         []db.Team
+	team          db.Team
+	teamMember    db.AddTeamMemberParams
 	members       []db.WorkspaceMember
 	member        db.WorkspaceMember
 	updated       db.WorkspaceMember
@@ -950,6 +951,31 @@ func (store *fakeTeamStore) ListWorkspaceMembers(context.Context) ([]db.Workspac
 		return nil, store.err
 	}
 	return store.members, nil
+}
+
+func (store *fakeTeamStore) ListTeams(context.Context) ([]db.Team, error) {
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.teams, nil
+}
+
+func (store *fakeTeamStore) CreateTeam(_ context.Context, params db.CreateTeamParams) (db.Team, error) {
+	if store.err != nil {
+		return db.Team{}, store.err
+	}
+	if store.team.ID != "" {
+		return store.team, nil
+	}
+	return db.Team{Name: params.Name}, nil
+}
+
+func (store *fakeTeamStore) AddTeamMember(_ context.Context, params db.AddTeamMemberParams) (db.Team, error) {
+	store.teamMember = params
+	if store.err != nil {
+		return db.Team{}, store.err
+	}
+	return store.team, nil
 }
 
 func (store *fakeTeamStore) CreateWorkspaceMember(_ context.Context, params db.CreateWorkspaceMemberParams) (db.WorkspaceMember, error) {

@@ -5,6 +5,7 @@ import {
   closestCorners,
   pointerWithin,
   rectIntersection,
+  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
@@ -72,16 +73,47 @@ type WorkspaceMember = {
   isAdmin: boolean;
 };
 
+type TeamMember = {
+  id: string;
+  teamId: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  role: WorkspaceRole;
+  isAdmin: boolean;
+};
+
+type Team = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  slug: string;
+  members: TeamMember[];
+};
+
 type Card = {
   id: string;
   columnId: string;
+  boardId: string;
+  boardName?: string;
   sprintId?: string;
   title: string;
   owner: string;
+  assigneeId: string;
+  assigneeName: string;
+  assigneeEmail: string;
+  labels: CardLabel[];
   priority: Priority;
   due: string;
   description: string;
   position: number;
+};
+
+type CardLabel = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  color: string;
 };
 
 type Column = {
@@ -121,8 +153,12 @@ type CardDetail = {
 
 type Board = {
   id: string;
+  workspaceId: string;
+  teamId: string;
   name: string;
   slug: string;
+  members: WorkspaceMember[];
+  labels: CardLabel[];
   columns: Column[];
   wikiPages: WikiPage[];
 };
@@ -130,6 +166,7 @@ type Board = {
 type BoardSummary = {
   id: string;
   workspaceId: string;
+  teamId: string;
   name: string;
   slug: string;
   columnCount: number;
@@ -140,8 +177,16 @@ type CardForm = {
   title: string;
   description: string;
   priority: string;
-  ownerInitials: string;
+  assigneeId: string;
+  labelText: string;
   due: string;
+};
+
+type BoardFilters = {
+  assigneeId: string;
+  labelId: string;
+  priority: string;
+  dueStatus: string;
 };
 
 type WikiForm = {
@@ -159,6 +204,7 @@ type MemberForm = {
 type Sprint = {
   id: string;
   workspaceId: string;
+  teamId: string;
   boardId: string;
   name: string;
   goal: string;
@@ -176,6 +222,9 @@ type SprintPlan = {
 
 type PlanningDashboard = {
   boardId: string;
+  teamId: string;
+  teamName: string;
+  boards: BoardSummary[];
   backlog: Card[];
   activeSprint?: SprintPlan | null;
   plannedSprints: SprintPlan[];
@@ -197,7 +246,8 @@ type WikiTreeNode = {
 };
 
 const workspaceRoleOptions: WorkspaceRole[] = ['owner', 'admin', 'member', 'viewer'];
-const emptyPlanningDashboard: PlanningDashboard = { boardId: '', backlog: [], plannedSprints: [], completedSprints: [] };
+const emptyPlanningDashboard: PlanningDashboard = { boardId: '', teamId: '', teamName: '', boards: [], backlog: [], plannedSprints: [], completedSprints: [] };
+const emptyBoardFilters: BoardFilters = { assigneeId: 'all', labelId: 'all', priority: 'all', dueStatus: 'all' };
 const boardCollisionDetection: CollisionDetection = (args) => {
   const withoutActive = (collisions: ReturnType<CollisionDetection>) => collisions.filter((collision) => collision.id !== args.active.id);
   const pointerCollisions = withoutActive(pointerWithin(args));
@@ -223,6 +273,11 @@ function App() {
   const [isNavCollapsed, setIsNavCollapsed] = useState(false);
   const [isBoardFullScreen, setIsBoardFullScreen] = useState(false);
   const [isRightRailCollapsed, setIsRightRailCollapsed] = useState(false);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [selectedTeamId, setSelectedTeamId] = useState('');
+  const [newTeamName, setNewTeamName] = useState('');
+  const [teamMemberForm, setTeamMemberForm] = useState({ userId: '', role: 'member' as WorkspaceRole });
+  const [teamMessage, setTeamMessage] = useState('');
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState('');
   const [board, setBoard] = useState<Board | null>(null);
@@ -233,13 +288,16 @@ function App() {
     title: '',
     description: '',
     priority: 'normal',
-    ownerInitials: '',
+    assigneeId: '',
+    labelText: '',
     due: '',
   });
   const [search, setSearch] = useState('');
+  const [boardFilters, setBoardFilters] = useState<BoardFilters>(emptyBoardFilters);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newCardTitle, setNewCardTitle] = useState('');
-  const [newCardOwner, setNewCardOwner] = useState('');
+  const [newCardAssigneeId, setNewCardAssigneeId] = useState('');
+  const [newCardLabels, setNewCardLabels] = useState('');
   const [isCreateBoardOpen, setIsCreateBoardOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState('');
   const [isCreateColumnOpen, setIsCreateColumnOpen] = useState(false);
@@ -260,7 +318,6 @@ function App() {
   const [isSavingMember, setIsSavingMember] = useState(false);
   const [planningDashboard, setPlanningDashboard] = useState<PlanningDashboard | null>(null);
   const [sprintForm, setSprintForm] = useState<SprintForm>({ name: '', goal: '', startsOn: '', endsOn: '' });
-  const [cardSprintDrafts, setCardSprintDrafts] = useState<Record<string, string>>({});
   const [isCompletingSprint, setIsCompletingSprint] = useState(false);
   const [sprintCompletionTargets, setSprintCompletionTargets] = useState<Record<string, string>>({});
   const [planningMessage, setPlanningMessage] = useState('');
@@ -276,6 +333,11 @@ function App() {
     setIsEditingCard(false);
     setIsBoardFullScreen(false);
     setIsRightRailCollapsed(false);
+    setTeams([]);
+    setSelectedTeamId('');
+    setNewTeamName('');
+    setTeamMemberForm({ userId: '', role: 'member' });
+    setTeamMessage('');
     setIsCreateOpen(false);
     setIsCreateBoardOpen(false);
     setNewBoardName('');
@@ -291,11 +353,13 @@ function App() {
     setIsSavingMember(false);
     setPlanningDashboard(null);
     setSprintForm({ name: '', goal: '', startsOn: '', endsOn: '' });
-    setCardSprintDrafts({});
     setIsCompletingSprint(false);
     setSprintCompletionTargets({});
     setPlanningMessage('');
     setNewComment('');
+    setBoardFilters(emptyBoardFilters);
+    setNewCardAssigneeId('');
+    setNewCardLabels('');
     setError('');
   }, []);
 
@@ -366,7 +430,7 @@ function App() {
         if (!response.ok) {
           throw new Error(`Failed to load boards: ${response.status}`);
         }
-        const nextBoards = ((await response.json()) as BoardSummary[]).sort((left, right) => left.name.localeCompare(right.name));
+        const nextBoards = sortBoardSummaries(await response.json());
         if (!cancelled) {
           setBoards(nextBoards);
           setSelectedBoardId((current) => {
@@ -393,6 +457,34 @@ function App() {
       cancelled = true;
     };
   }, [authState, resetWorkspace]);
+
+  useEffect(() => {
+    if (authState !== 'authenticated') {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadTeams() {
+      try {
+        const nextTeams = sortTeams(await getJSON<Team[]>('/api/teams'));
+        if (!cancelled) {
+          setTeams(nextTeams);
+          setSelectedTeamId((current) => (nextTeams.some((team) => team.id === current) ? current : nextTeams[0]?.id ?? ''));
+          setError('');
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Could not load teams. Check that migrations have run and the API is available.');
+        }
+      }
+    }
+
+    loadTeams();
+    return () => {
+      cancelled = true;
+    };
+  }, [authState]);
 
   useEffect(() => {
     if (authState !== 'authenticated' || !selectedBoardId || board?.id === selectedBoardId) {
@@ -497,14 +589,14 @@ function App() {
   }, [activeView, authState, currentUser?.isAdmin]);
 
   useEffect(() => {
-    if (authState !== 'authenticated' || activeView !== 'planning' || !selectedBoardId) {
+    if (authState !== 'authenticated' || activeView !== 'planning' || !selectedTeamId) {
       return;
     }
 
     let cancelled = false;
     async function loadPlanning() {
       try {
-        const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedBoardId)));
+        const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedTeamId)));
         if (!cancelled) {
           setPlanningDashboard(dashboard);
           setIsCompletingSprint(false);
@@ -523,7 +615,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeView, authState, selectedBoardId]);
+  }, [activeView, authState, selectedTeamId]);
 
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
@@ -533,10 +625,13 @@ function App() {
   const rightRailAttached = activeView === 'boards' && !boardFullScreen;
   const rightRailVisible = rightRailAttached && !isRightRailCollapsed;
   const planning = planningDashboard ?? emptyPlanningDashboard;
-  const sprintOptions = [
-    ...planning.plannedSprints.map((plan) => plan.sprint),
-    ...(planning.activeSprint ? [planning.activeSprint.sprint] : []),
-  ];
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
+  const boardOptions = useMemo(() => (selectedTeamId ? boards.filter((summary) => summary.teamId === selectedTeamId) : boards), [boards, selectedTeamId]);
+  const timelinePlans = [
+    ...planning.completedSprints,
+    ...(planning.activeSprint ? [planning.activeSprint] : []),
+    ...planning.plannedSprints,
+  ].sort((left, right) => sprintSortKey(left.sprint).localeCompare(sprintSortKey(right.sprint)) || left.sprint.name.localeCompare(right.sprint.name));
   const layoutGridColumns = rightRailAttached
     ? isNavCollapsed
       ? isRightRailCollapsed
@@ -549,19 +644,28 @@ function App() {
       ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)]'
       : 'lg:grid-cols-[14rem_minmax(0,1fr)]';
 
+  useEffect(() => {
+    if (!selectedTeamId || boardOptions.some((summary) => summary.id === selectedBoardId)) {
+      return;
+    }
+    setSelectedBoardId(boardOptions[0]?.id ?? '');
+    setBoard(null);
+    setSelectedCardId('');
+  }, [boardOptions, selectedBoardId, selectedTeamId]);
+
   const filteredColumns = useMemo(() => {
     if (!board) {
       return [];
     }
-    if (!normalizedSearch) {
+    if (!normalizedSearch && !hasActiveBoardFilters(boardFilters)) {
       return board.columns;
     }
 
     return board.columns.map((column) => ({
       ...column,
-      cards: column.cards.filter((card) => cardMatchesSearch(card, normalizedSearch)),
+      cards: column.cards.filter((card) => cardMatchesSearch(card, normalizedSearch) && cardMatchesFilters(card, boardFilters)),
     }));
-  }, [board, normalizedSearch]);
+  }, [board, boardFilters, normalizedSearch]);
 
   const filteredWikiPages = useMemo(() => {
     const wikiPages = board?.wikiPages ?? [];
@@ -620,6 +724,7 @@ function App() {
     setIsEditingCard(false);
     setSelectedWikiPage(null);
     setIsCreatingWikiPage(false);
+    setBoardFilters(emptyBoardFilters);
     setError('');
   }
 
@@ -630,15 +735,20 @@ function App() {
     if (!name) {
       return;
     }
+    if (!selectedTeamId) {
+      setError('Select a team before creating a board.');
+      return;
+    }
 
     try {
       const nextBoard = normalizeBoard(
         await requestJSON<Board>('/api/boards', {
           method: 'POST',
-          body: JSON.stringify({ name }),
+          body: JSON.stringify({ name, teamId: selectedTeamId }),
         }),
       );
       setBoards((current) => upsertBoardSummary(current, nextBoard));
+      setSelectedTeamId(nextBoard.teamId || selectedTeamId);
       setSelectedBoardId(nextBoard.id);
       setBoard(nextBoard);
       setSelectedCardId('');
@@ -651,6 +761,56 @@ function App() {
       setError('');
     } catch {
       setError('Could not create the board.');
+    }
+  }
+
+  async function createTeam(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = newTeamName.trim();
+    if (!name) {
+      return;
+    }
+
+    try {
+      const team = normalizeTeam(
+        await requestJSON<Team>('/api/teams', {
+          method: 'POST',
+          body: JSON.stringify({ name }),
+        }),
+      );
+      setTeams((current) => sortTeams([...current.filter((candidate) => candidate.id !== team.id), team]));
+      setSelectedTeamId(team.id);
+      setNewTeamName('');
+      setPlanningDashboard(null);
+      setTeamMessage('Team created.');
+      setPlanningMessage('Team created.');
+      setError('');
+    } catch {
+      setTeamMessage('Could not create team.');
+      setPlanningMessage('Could not create team.');
+    }
+  }
+
+  async function addMemberToTeam(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTeamId || !teamMemberForm.userId) {
+      setTeamMessage('Choose a team and a member.');
+      return;
+    }
+
+    try {
+      const team = normalizeTeam(
+        await requestJSON<Team>(`/api/teams/${selectedTeamId}/members`, {
+          method: 'POST',
+          body: JSON.stringify({ userId: teamMemberForm.userId, role: teamMemberForm.role }),
+        }),
+      );
+      setTeams((current) => sortTeams([...current.filter((candidate) => candidate.id !== team.id), team]));
+      setTeamMemberForm({ userId: '', role: 'member' });
+      setTeamMessage('Member assigned to team.');
+      setError('');
+    } catch {
+      setTeamMessage('Could not assign member to team.');
     }
   }
 
@@ -717,6 +877,13 @@ function App() {
     }
   }
 
+  function openCreateCard() {
+    setNewCardTitle('');
+    setNewCardAssigneeId(defaultAssigneeId(board, currentUser));
+    setNewCardLabels('');
+    setIsCreateOpen(true);
+  }
+
   async function createCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!board) {
@@ -735,14 +902,17 @@ function App() {
     }
 
     try {
-      const card = await requestJSON<Card>('/api/cards', {
-        method: 'POST',
-        body: JSON.stringify({
-          columnId: firstColumn.id,
-          title,
-          ownerInitials: ownerInitials(newCardOwner),
+      const card = normalizeCard(
+        await requestJSON<Card>('/api/cards', {
+          method: 'POST',
+          body: JSON.stringify({
+            columnId: firstColumn.id,
+            title,
+            assigneeId: newCardAssigneeId,
+            labelNames: parseLabelText(newCardLabels),
+          }),
         }),
-      });
+      );
 
       const nextBoard = addCardToBoard(board, card);
       setBoard(nextBoard);
@@ -752,7 +922,8 @@ function App() {
       setSelectedCardId(card.id);
       setIsRightRailCollapsed(false);
       setNewCardTitle('');
-      setNewCardOwner('');
+      setNewCardAssigneeId('');
+      setNewCardLabels('');
       setIsCreateOpen(false);
       showView('boards');
       setError('');
@@ -793,7 +964,8 @@ function App() {
       title: cardForm.title.trim(),
       description: cardForm.description.trim(),
       priority: cardForm.priority,
-      ownerInitials: ownerInitials(cardForm.ownerInitials),
+      assigneeId: cardForm.assigneeId,
+      labelNames: parseLabelText(cardForm.labelText),
       due: cardForm.due.trim(),
     };
     if (!payload.title || !payload.due) {
@@ -802,10 +974,12 @@ function App() {
     }
 
     try {
-      const card = await requestJSON<Card>(`/api/cards/${selectedCard.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      });
+      const card = normalizeCard(
+        await requestJSON<Card>(`/api/cards/${selectedCard.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        }),
+      );
       setBoard((current) => replaceCardInBoard(current, card));
       setCardDetail((current) =>
         current && current.card.id === card.id
@@ -945,13 +1119,18 @@ function App() {
 
   async function submitSprint(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedBoardId) {
-      setPlanningMessage('Select a board before creating a sprint.');
+    if (!selectedTeamId) {
+      setPlanningMessage('Select a team before creating a sprint.');
+      return;
+    }
+    if (!boardOptions.length) {
+      setPlanningMessage('Create a board for this team before creating a sprint.');
       return;
     }
 
     const payload = {
-      boardId: selectedBoardId,
+      teamId: selectedTeamId,
+      boardId: boardOptions[0]?.id ?? '',
       name: sprintForm.name.trim(),
       goal: sprintForm.goal.trim(),
       startsOn: sprintForm.startsOn.trim(),
@@ -975,25 +1154,20 @@ function App() {
     }
   }
 
-  async function assignCardToSelectedSprint(card: Card) {
-    const sprintId = cardSprintDrafts[card.id] ?? sprintOptions[0]?.id ?? '';
-    if (!sprintId) {
-      setPlanningMessage('Create a sprint before assigning backlog cards.');
-      return;
-    }
-
+  async function movePlanningCard(card: Card, sprintId: string) {
     try {
-      const assignedCard = await requestJSON<Card>(`/api/cards/${card.id}/sprint`, {
-        method: 'PATCH',
-        body: JSON.stringify({ sprintId }),
-      });
+      const assignedCard = normalizeCard(
+        await requestJSON<Card>(`/api/cards/${card.id}/sprint`, {
+          method: 'PATCH',
+          body: JSON.stringify({ sprintId }),
+        }),
+      );
       setPlanningDashboard((current) => assignCardInDashboard(current ?? emptyPlanningDashboard, assignedCard));
       setBoard((current) => replaceCardInBoard(current, assignedCard));
       setCardDetail((current) => (current && current.card.id === assignedCard.id ? { ...current, card: assignedCard } : current));
-      setCardSprintDrafts((current) => ({ ...current, [card.id]: sprintId }));
-      setPlanningMessage('Card assigned to sprint.');
+      setPlanningMessage(sprintId ? 'Card assigned to sprint.' : 'Card moved to backlog.');
     } catch {
-      setPlanningMessage('Could not assign card to sprint.');
+      setPlanningMessage('Could not move the card.');
     }
   }
 
@@ -1023,8 +1197,8 @@ function App() {
       setPlanningMessage('No active sprint to complete.');
       return;
     }
-    if (!selectedBoardId) {
-      setPlanningMessage('Select a board before completing a sprint.');
+    if (!selectedTeamId) {
+      setPlanningMessage('Select a team before completing a sprint.');
       return;
     }
 
@@ -1039,7 +1213,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ rollover }),
       });
-      const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedBoardId)));
+      const dashboard = normalizePlanningDashboard(await getJSON<PlanningDashboard>(planningDashboardURL(selectedTeamId)));
       setPlanningDashboard(dashboard);
       setBoard(null);
       setIsCompletingSprint(false);
@@ -1048,6 +1222,24 @@ function App() {
     } catch {
       setPlanningMessage('Could not complete sprint.');
     }
+  }
+
+  async function handlePlanningDragEnd(event: DragEndEvent) {
+    if (!event.over) {
+      return;
+    }
+
+    const target = resolvePlanningMoveTarget(String(event.active.id), String(event.over.id));
+    if (!target) {
+      return;
+    }
+
+    const card = findPlanningCard(planning, target.cardId);
+    if (!card || (card.sprintId ?? '') === target.sprintId) {
+      return;
+    }
+
+    await movePlanningCard(card, target.sprintId);
   }
 
   async function handleDragEnd(event: DragEndEvent) {
@@ -1155,7 +1347,7 @@ function App() {
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
             type="button"
-            onClick={() => setIsCreateOpen(true)}
+            onClick={openCreateCard}
             disabled={!board}
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
@@ -1246,6 +1438,27 @@ function App() {
                 </div>
                 <div className="flex flex-wrap items-end gap-2">
                   <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="team-selector">
+                      Team
+                    </label>
+                    <select
+                      id="team-selector"
+                      className="h-9 min-w-44 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={selectedTeamId}
+                      onChange={(event) => setSelectedTeamId(event.target.value)}
+                    >
+                      {teams.length > 0 ? (
+                        teams.map((team) => (
+                          <option key={team.id} value={team.id}>
+                            {team.name}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">No teams</option>
+                      )}
+                    </select>
+                  </div>
+                  <div>
                     <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="board-selector">
                       Board
                     </label>
@@ -1255,8 +1468,8 @@ function App() {
                       value={selectedBoardId}
                       onChange={(event) => selectBoard(event.target.value)}
                     >
-                      {boards.length > 0 ? (
-                        boards.map((summary) => (
+                      {boardOptions.length > 0 ? (
+                        boardOptions.map((summary) => (
                           <option key={summary.id} value={summary.id}>
                             {summary.name}
                           </option>
@@ -1282,6 +1495,83 @@ function App() {
                   </div>
                 </div>
               </div>
+
+              {board ? (
+                <section className="mb-3 grid gap-2 rounded-md border border-slate-200 bg-white p-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Board filters">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="filter-assignee">
+                      Filter by assignee
+                    </label>
+                    <select
+                      id="filter-assignee"
+                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={boardFilters.assigneeId}
+                      onChange={(event) => setBoardFilters((current) => ({ ...current, assigneeId: event.target.value }))}
+                    >
+                      <option value="all">Any assignee</option>
+                      <option value="unassigned">Unassigned</option>
+                      {board.members.map((member) => (
+                        <option key={member.userId} value={member.userId}>
+                          {member.displayName || member.email}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="filter-label">
+                      Filter by label
+                    </label>
+                    <select
+                      id="filter-label"
+                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={boardFilters.labelId}
+                      onChange={(event) => setBoardFilters((current) => ({ ...current, labelId: event.target.value }))}
+                    >
+                      <option value="all">Any label</option>
+                      <option value="none">No label</option>
+                      {board.labels.map((label) => (
+                        <option key={label.id} value={label.id}>
+                          {label.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="filter-priority">
+                      Filter by priority
+                    </label>
+                    <select
+                      id="filter-priority"
+                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={boardFilters.priority}
+                      onChange={(event) => setBoardFilters((current) => ({ ...current, priority: event.target.value }))}
+                    >
+                      <option value="all">Any priority</option>
+                      <option value="urgent">Urgent</option>
+                      <option value="high">High</option>
+                      <option value="normal">Normal</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="filter-due">
+                      Filter by due status
+                    </label>
+                    <select
+                      id="filter-due"
+                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                      value={boardFilters.dueStatus}
+                      onChange={(event) => setBoardFilters((current) => ({ ...current, dueStatus: event.target.value }))}
+                    >
+                      <option value="all">Any due date</option>
+                      <option value="overdue">Overdue</option>
+                      <option value="due soon">Due soon</option>
+                      <option value="scheduled">Scheduled</option>
+                      <option value="date missing">Missing date</option>
+                    </select>
+                  </div>
+                </section>
+              ) : null}
 
               {error ? (
                 <p className="mb-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
@@ -1395,7 +1685,7 @@ function App() {
                           onChange={(event) => setCardForm((current) => ({ ...current, description: event.target.value }))}
                         />
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                         <div>
                           <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-priority">
                             Priority
@@ -1413,17 +1703,37 @@ function App() {
                             <option value="urgent">Urgent</option>
                           </select>
                         </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-owner">
-                            Owner initials
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-assignee">
+                            Assignee
+                          </label>
+                          <select
+                            id="edit-card-assignee"
+                            name="assignee"
+                            className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                            value={cardForm.assigneeId}
+                            onChange={(event) => setCardForm((current) => ({ ...current, assigneeId: event.target.value }))}
+                          >
+                            <option value="">Unassigned</option>
+                            {board?.members.map((member) => (
+                              <option key={member.userId} value={member.userId}>
+                                {member.displayName || member.email}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-labels">
+                            Labels
                           </label>
                           <input
-                            id="edit-card-owner"
-                            name="owner"
-                            className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm uppercase outline-none focus:border-slate-950"
-                            maxLength={3}
-                            value={cardForm.ownerInitials}
-                            onChange={(event) => setCardForm((current) => ({ ...current, ownerInitials: event.target.value }))}
+                            id="edit-card-labels"
+                            name="labels"
+                            className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                            value={cardForm.labelText}
+                            onChange={(event) => setCardForm((current) => ({ ...current, labelText: event.target.value }))}
                           />
                         </div>
                       </div>
@@ -1462,12 +1772,13 @@ function App() {
                       <h3 className="text-lg font-semibold leading-6">{selectedCard.title}</h3>
                       <p className="mt-2 text-sm leading-6 text-slate-600">{selectedCard.description}</p>
                       <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-slate-600">
-                        <p>Owner {selectedCard.owner}</p>
+                        <p>Assignee {cardAssigneeText(selectedCard)}</p>
                         <p>Priority {selectedCard.priority}</p>
                         <p>
                           <DueBadge due={selectedCard.due} prefix />
                         </p>
                       </div>
+                      <LabelList labels={selectedCard.labels} />
                     </>
                   )}
 
@@ -1603,7 +1914,7 @@ function App() {
                               onChange={(event) => setCardForm((current) => ({ ...current, description: event.target.value }))}
                             />
                           </div>
-                          <div className="grid gap-2 sm:grid-cols-3">
+                          <div className="grid gap-2 sm:grid-cols-2">
                             <div>
                               <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-priority">
                                 Priority
@@ -1622,19 +1933,6 @@ function App() {
                               </select>
                             </div>
                             <div>
-                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-owner">
-                                Owner initials
-                              </label>
-                              <input
-                                id="page-card-owner"
-                                name="owner"
-                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm uppercase outline-none focus:border-slate-950"
-                                maxLength={3}
-                                value={cardForm.ownerInitials}
-                                onChange={(event) => setCardForm((current) => ({ ...current, ownerInitials: event.target.value }))}
-                              />
-                            </div>
-                            <div>
                               <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-due">
                                 Due date
                               </label>
@@ -1645,6 +1943,39 @@ function App() {
                                 className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
                                 value={cardForm.due}
                                 onChange={(event) => setCardForm((current) => ({ ...current, due: event.target.value }))}
+                              />
+                            </div>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-assignee">
+                                Assignee
+                              </label>
+                              <select
+                                id="page-card-assignee"
+                                name="assignee"
+                                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                                value={cardForm.assigneeId}
+                                onChange={(event) => setCardForm((current) => ({ ...current, assigneeId: event.target.value }))}
+                              >
+                                <option value="">Unassigned</option>
+                                {board?.members.map((member) => (
+                                  <option key={member.userId} value={member.userId}>
+                                    {member.displayName || member.email}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-labels">
+                                Labels
+                              </label>
+                              <input
+                                id="page-card-labels"
+                                name="labels"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                value={cardForm.labelText}
+                                onChange={(event) => setCardForm((current) => ({ ...current, labelText: event.target.value }))}
                               />
                             </div>
                           </div>
@@ -1669,12 +2000,13 @@ function App() {
                         <>
                           <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">{selectedCard.description}</p>
                           <div className="mt-4 grid gap-2 text-sm text-slate-600 sm:grid-cols-3">
-                            <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Owner {selectedCard.owner}</p>
+                            <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Assignee {cardAssigneeText(selectedCard)}</p>
                             <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">Priority {selectedCard.priority}</p>
                             <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                               <DueBadge due={selectedCard.due} prefix />
                             </p>
                           </div>
+                          <LabelList labels={selectedCard.labels} />
                         </>
                       )}
                     </div>
@@ -1722,219 +2054,236 @@ function App() {
                 )}
               </section>
             ) : activeView === 'planning' ? (
-              <section className="max-w-7xl" aria-label="Planning workspace">
-                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <section className="max-w-none" aria-label="Planning workspace">
+                <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Sprint planning</p>
                     <h1 className="text-2xl font-semibold tracking-normal">Planning dashboard</h1>
                   </div>
-                  <p className="text-sm text-slate-500">
-                    {planning.backlog.length} backlog {planning.backlog.length === 1 ? 'card' : 'cards'}
-                  </p>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="planning-team-selector">
+                        Team
+                      </label>
+                      <select
+                        id="planning-team-selector"
+                        className="h-9 min-w-52 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                        value={selectedTeamId}
+                        onChange={(event) => setSelectedTeamId(event.target.value)}
+                      >
+                        {teams.length > 0 ? (
+                          teams.map((team) => (
+                            <option key={team.id} value={team.id}>
+                              {team.name}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="">No teams</option>
+                        )}
+                      </select>
+                    </div>
+                    <span className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-600">
+                      {boardOptions.length} {boardOptions.length === 1 ? 'board' : 'boards'}
+                    </span>
+                    <span className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-600">
+                      {planning.backlog.length} backlog {planning.backlog.length === 1 ? 'card' : 'cards'}
+                    </span>
+                  </div>
                 </div>
 
                 {planningMessage ? (
                   <p className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">{planningMessage}</p>
                 ) : null}
 
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-                  <div className="space-y-4">
-                    <section aria-label="Active sprint" className="rounded-md border border-slate-200 bg-white p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h2 className="text-sm font-semibold">Active sprint</h2>
-                        <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
-                          {planning.activeSprint ? 'Running' : 'No active sprint'}
-                        </span>
-                      </div>
-                      {planning.activeSprint ? (
-                        <>
-                          <SprintPlanBlock plan={planning.activeSprint} action="complete" onComplete={beginPlanningSprintCompletion} />
-                          {isCompletingSprint ? (
-                            <form className="mt-3 space-y-3 rounded-md border border-emerald-100 bg-emerald-50 p-3" onSubmit={completePlanningSprint}>
-                              <div>
-                                <h3 className="text-sm font-semibold text-emerald-950">Complete sprint</h3>
-                                <p className="mt-1 text-sm text-emerald-800">Choose which unfinished cards move forward. Others return to backlog.</p>
-                              </div>
-                              {planning.activeSprint.cards.length ? (
-                                <div className="space-y-2">
-                                  {planning.activeSprint.cards.map((card) => (
-                                    <label key={card.id} className="block rounded-md border border-emerald-100 bg-white p-2 text-sm">
-                                      <span className="block font-medium text-slate-800">{card.title}</span>
-                                      <select
-                                        className="mt-2 h-9 w-full rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-950"
-                                        aria-label={`Completion target for ${card.title}`}
-                                        value={sprintCompletionTargets[card.id] ?? ''}
-                                        onChange={(event) =>
-                                          setSprintCompletionTargets((current) => ({ ...current, [card.id]: event.target.value }))
-                                        }
-                                      >
-                                        <option value="">Backlog</option>
-                                        {planning.plannedSprints.map((plan) => (
-                                          <option key={plan.sprint.id} value={plan.sprint.id}>
-                                            {plan.sprint.name}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </label>
-                                  ))}
-                                </div>
-                              ) : (
-                                <p className="rounded-md border border-emerald-100 bg-white px-3 py-3 text-sm text-slate-500">
-                                  This sprint has no cards assigned.
-                                </p>
-                              )}
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800"
-                                  type="submit"
-                                >
-                                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                                  Complete sprint
-                                </button>
-                                <button
-                                  className="inline-flex h-9 items-center justify-center rounded-md border border-emerald-200 bg-white px-3 text-sm font-medium text-emerald-800 hover:bg-emerald-100"
-                                  type="button"
-                                  onClick={() => {
-                                    setIsCompletingSprint(false);
-                                    setSprintCompletionTargets({});
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            </form>
-                          ) : null}
-                        </>
-                      ) : (
-                        <p className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
-                          Start a planned sprint when the team is ready to commit work.
-                        </p>
-                      )}
-                    </section>
+                <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handlePlanningDragEnd}>
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+                    <div className="space-y-4">
+                      <section aria-label="Sprint timeline" className="rounded-md border border-slate-200 bg-white p-4">
+                        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <h2 className="text-sm font-semibold">Sprint timeline</h2>
+                            <p className="text-sm text-slate-500">{selectedTeam?.name || planning.teamName || 'Selected team'}</p>
+                          </div>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">
+                            {timelinePlans.length} {timelinePlans.length === 1 ? 'sprint' : 'sprints'}
+                          </span>
+                        </div>
+                        {timelinePlans.length ? (
+                          <div className="overflow-x-auto pb-1">
+                            <div className="grid min-w-[60rem] auto-cols-[minmax(18rem,1fr)] grid-flow-col gap-3">
+                              {timelinePlans.map((plan) => (
+                                <PlanningSprintLane
+                                  key={plan.sprint.id}
+                                  plan={plan}
+                                  onStart={startPlanningSprint}
+                                  onComplete={beginPlanningSprintCompletion}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-10 text-center text-sm text-slate-500">
+                            No sprints planned for this team yet.
+                          </p>
+                        )}
+                      </section>
 
-                    <section aria-label="Backlog" className="rounded-md border border-slate-200 bg-white p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h2 className="text-sm font-semibold">Backlog</h2>
-                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.backlog.length}</span>
-                      </div>
-                      <div className="space-y-2">
-                        {planning.backlog.length ? (
-                          planning.backlog.map((card) => (
-                            <PlanningCardRow
-                              key={card.id}
-                              card={card}
-                              sprintOptions={sprintOptions}
-                              sprintId={cardSprintDrafts[card.id] ?? sprintOptions[0]?.id ?? ''}
-                              onSprintChange={(sprintId) => setCardSprintDrafts((current) => ({ ...current, [card.id]: sprintId }))}
-                              onAssign={() => assignCardToSelectedSprint(card)}
+                      {planning.activeSprint && isCompletingSprint ? (
+                        <form className="space-y-3 rounded-md border border-emerald-100 bg-emerald-50 p-4" onSubmit={completePlanningSprint}>
+                          <div>
+                            <h2 className="text-sm font-semibold text-emerald-950">Complete sprint</h2>
+                            <p className="mt-1 text-sm text-emerald-800">Choose where unfinished cards land next.</p>
+                          </div>
+                          {planning.activeSprint.cards.length ? (
+                            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                              {planning.activeSprint.cards.map((card) => (
+                                <label key={card.id} className="block rounded-md border border-emerald-100 bg-white p-2 text-sm">
+                                  <span className="block font-medium text-slate-800">{card.title}</span>
+                                  <select
+                                    className="mt-2 h-9 w-full rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-950"
+                                    aria-label={`Completion target for ${card.title}`}
+                                    value={sprintCompletionTargets[card.id] ?? ''}
+                                    onChange={(event) => setSprintCompletionTargets((current) => ({ ...current, [card.id]: event.target.value }))}
+                                  >
+                                    <option value="">Backlog</option>
+                                    {planning.plannedSprints.map((plan) => (
+                                      <option key={plan.sprint.id} value={plan.sprint.id}>
+                                        {plan.sprint.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="rounded-md border border-emerald-100 bg-white px-3 py-3 text-sm text-slate-500">
+                              This sprint has no cards assigned.
+                            </p>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800"
+                              type="submit"
+                            >
+                              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                              Complete sprint
+                            </button>
+                            <button
+                              className="inline-flex h-9 items-center justify-center rounded-md border border-emerald-200 bg-white px-3 text-sm font-medium text-emerald-800 hover:bg-emerald-100"
+                              type="button"
+                              onClick={() => {
+                                setIsCompletingSprint(false);
+                                setSprintCompletionTargets({});
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      ) : null}
+
+                      <PlanningDropZone id="planning-backlog" className="rounded-md border border-slate-200 bg-white p-4" label="Backlog">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h2 className="text-sm font-semibold">Backlog</h2>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.backlog.length}</span>
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                          {planning.backlog.length ? (
+                            planning.backlog.map((card) => <PlanningCardRow key={card.id} card={card} />)
+                          ) : (
+                            <p className="rounded-md border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">
+                              Backlog is clear. New unassigned team cards will appear here.
+                            </p>
+                          )}
+                        </div>
+                      </PlanningDropZone>
+                    </div>
+
+                    <aside className="space-y-4" aria-label="Sprint controls">
+                      <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
+                        <h2 className="text-sm font-semibold">Create sprint</h2>
+                        <div className="mt-3 space-y-3">
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
+                              Sprint name
+                            </label>
+                            <input
+                              id="sprint-name"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={sprintForm.name}
+                              onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
                             />
-                          ))
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-goal">
+                              Sprint goal
+                            </label>
+                            <textarea
+                              id="sprint-goal"
+                              className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                              value={sprintForm.goal}
+                              onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
+                                Starts on
+                              </label>
+                              <input
+                                id="sprint-starts-on"
+                                type="date"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                value={sprintForm.startsOn}
+                                onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
+                                Ends on
+                              </label>
+                              <input
+                                id="sprint-ends-on"
+                                type="date"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                value={sprintForm.endsOn}
+                                onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
+                              />
+                            </div>
+                          </div>
+                          <button
+                            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                            type="submit"
+                          >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            Create sprint
+                          </button>
+                        </div>
+                      </form>
+
+                      <section className="rounded-md border border-slate-200 bg-white p-4" aria-label="Team planning boards">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h2 className="text-sm font-semibold">Team boards</h2>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{boardOptions.length}</span>
+                        </div>
+                        {boardOptions.length ? (
+                          <ul className="space-y-2">
+                            {boardOptions.map((summary) => (
+                              <li key={summary.id} className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2">
+                                <p className="text-sm font-medium text-slate-800">{summary.name}</p>
+                                <p className="text-xs text-slate-500">{summary.cardCount} cards</p>
+                              </li>
+                            ))}
+                          </ul>
                         ) : (
                           <p className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
-                            Backlog is clear. New unassigned board cards will appear here.
+                            No boards for this team.
                           </p>
                         )}
-                      </div>
-                    </section>
+                      </section>
+                    </aside>
                   </div>
-
-                  <aside className="space-y-4" aria-label="Sprint controls">
-                    <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
-                      <h2 className="text-sm font-semibold">Create sprint</h2>
-                      <div className="mt-3 space-y-3">
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
-                            Sprint name
-                          </label>
-                          <input
-                            id="sprint-name"
-                            className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                            value={sprintForm.name}
-                            onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
-                          />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-goal">
-                            Sprint goal
-                          </label>
-                          <textarea
-                            id="sprint-goal"
-                            className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
-                            value={sprintForm.goal}
-                            onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
-                          />
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
-                              Starts on
-                            </label>
-                            <input
-                              id="sprint-starts-on"
-                              type="date"
-                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                              value={sprintForm.startsOn}
-                              onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
-                            />
-                          </div>
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
-                              Ends on
-                            </label>
-                            <input
-                              id="sprint-ends-on"
-                              type="date"
-                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                              value={sprintForm.endsOn}
-                              onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
-                            />
-                          </div>
-                        </div>
-                        <button
-                          className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
-                          type="submit"
-                        >
-                          <Plus className="h-4 w-4" aria-hidden="true" />
-                          Create sprint
-                        </button>
-                      </div>
-                    </form>
-
-                    <section aria-label="Planned sprints" className="rounded-md border border-slate-200 bg-white p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h2 className="text-sm font-semibold">Planned sprints</h2>
-                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.plannedSprints.length}</span>
-                      </div>
-                      <div className="space-y-3">
-                        {planning.plannedSprints.length ? (
-                          planning.plannedSprints.map((plan) => (
-                            <SprintPlanBlock key={plan.sprint.id} plan={plan} action="start" onStart={startPlanningSprint} />
-                          ))
-                        ) : (
-                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-5 text-center text-sm text-slate-500">
-                            No planned sprints yet.
-                          </p>
-                        )}
-                      </div>
-                    </section>
-
-                    <section aria-label="Completed sprints" className="rounded-md border border-slate-200 bg-white p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h2 className="text-sm font-semibold">Completed sprints</h2>
-                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{planning.completedSprints.length}</span>
-                      </div>
-                      <div className="space-y-3">
-                        {planning.completedSprints.length ? (
-                          planning.completedSprints.map((plan) => <SprintPlanBlock key={plan.sprint.id} plan={plan} action="none" />)
-                        ) : (
-                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-5 text-center text-sm text-slate-500">
-                            Completed sprints will collect here.
-                          </p>
-                        )}
-                      </div>
-                    </section>
-                  </aside>
-                </div>
+                </DndContext>
               </section>
             ) : activeView === 'wiki' ? (
               <section className="max-w-5xl">
@@ -2025,10 +2374,148 @@ function App() {
                   <div className="rounded-md border border-slate-200 bg-white p-4">
                     <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                       <div>
+                        <h2 className="text-sm font-semibold">Teams</h2>
+                        <p className="text-sm text-slate-500">Teams own boards, sprint timelines, and planning backlog.</p>
+                      </div>
+                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{teams.length} teams</p>
+                    </div>
+
+                    {teamMessage ? (
+                      <p className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{teamMessage}</p>
+                    ) : null}
+
+                    {currentUser?.isAdmin ? (
+                      <div className="space-y-4">
+                        <form className="flex flex-col gap-3 sm:flex-row sm:items-end" onSubmit={createTeam}>
+                          <div className="min-w-64">
+                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="team-name">
+                              Team name
+                            </label>
+                            <input
+                              id="team-name"
+                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                              value={newTeamName}
+                              onChange={(event) => setNewTeamName(event.target.value)}
+                            />
+                          </div>
+                          <button
+                            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                            type="submit"
+                          >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            Create team
+                          </button>
+                        </form>
+
+                        <div className="grid gap-4 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
+                          <div className="space-y-1">
+                            {teams.length ? (
+                              teams.map((team) => (
+                                <button
+                                  key={team.id}
+                                  className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm ${
+                                    selectedTeamId === team.id ? 'bg-slate-950 text-white' : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
+                                  }`}
+                                  type="button"
+                                  aria-pressed={selectedTeamId === team.id}
+                                  onClick={() => setSelectedTeamId(team.id)}
+                                >
+                                  <span className="min-w-0 truncate">{team.name}</span>
+                                  <span className={selectedTeamId === team.id ? 'text-slate-300' : 'text-slate-500'}>{team.members.length}</span>
+                                </button>
+                              ))
+                            ) : (
+                              <p className="rounded-md border border-dashed border-slate-200 px-3 py-5 text-center text-sm text-slate-500">No teams.</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <div className="rounded-md border border-slate-200">
+                              <div className="border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">
+                                {selectedTeam?.name || 'Selected team'} members
+                              </div>
+                              {selectedTeam?.members.length ? (
+                                <div className="divide-y divide-slate-100">
+                                  {selectedTeam.members.map((member) => (
+                                    <div key={member.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                                      <div className="min-w-0">
+                                        <p className="truncate text-sm font-medium text-slate-900">{member.displayName || member.email}</p>
+                                        <p className="text-xs text-slate-500">{member.email}</p>
+                                      </div>
+                                      <span className="inline-flex rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700">
+                                        {displayWorkspaceRole(member.role)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="px-3 py-6 text-center text-sm text-slate-500">No members assigned.</p>
+                              )}
+                            </div>
+
+                            <form className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem_auto]" onSubmit={addMemberToTeam}>
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="team-member-user">
+                                  Team member
+                                </label>
+                                <select
+                                  id="team-member-user"
+                                  className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                                  value={teamMemberForm.userId}
+                                  onChange={(event) => setTeamMemberForm((current) => ({ ...current, userId: event.target.value }))}
+                                >
+                                  <option value="">Choose member</option>
+                                  {workspaceMembers.map((member) => (
+                                    <option key={member.userId} value={member.userId}>
+                                      {member.displayName || member.email}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="team-member-role">
+                                  Team role
+                                </label>
+                                <select
+                                  id="team-member-role"
+                                  className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                                  value={teamMemberForm.role}
+                                  onChange={(event) => setTeamMemberForm((current) => ({ ...current, role: event.target.value as WorkspaceRole }))}
+                                >
+                                  {workspaceRoleOptions.map((role) => (
+                                    <option key={role} value={role}>
+                                      {displayWorkspaceRole(role)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="flex items-end">
+                                <button
+                                  className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                                  type="submit"
+                                >
+                                  <Plus className="h-4 w-4" aria-hidden="true" />
+                                  Assign
+                                </button>
+                              </div>
+                            </form>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                        Admin access is required to manage teams.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-md border border-slate-200 bg-white p-4">
+                    <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
                         <h2 className="text-sm font-semibold">Board administration</h2>
                         <p className="text-sm text-slate-500">Boards, columns, and workflow states.</p>
                       </div>
-                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boards.length} boards</p>
+                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boardOptions.length} boards</p>
                     </div>
 
                     {currentUser?.isAdmin ? (
@@ -2044,8 +2531,8 @@ function App() {
                               value={selectedBoardId}
                               onChange={(event) => selectBoard(event.target.value)}
                             >
-                              {boards.length > 0 ? (
-                                boards.map((summary) => (
+                              {boardOptions.length > 0 ? (
+                                boardOptions.map((summary) => (
                                   <option key={summary.id} value={summary.id}>
                                     {summary.name}
                                   </option>
@@ -2281,6 +2768,27 @@ function App() {
                 autoFocus
               />
             </div>
+            <div className="mt-3">
+              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="board-team">
+                Team
+              </label>
+              <select
+                id="board-team"
+                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                value={selectedTeamId}
+                onChange={(event) => setSelectedTeamId(event.target.value)}
+              >
+                {teams.length > 0 ? (
+                  teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No teams</option>
+                )}
+              </select>
+            </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
@@ -2418,16 +2926,34 @@ function App() {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="card-owner">
-                  Owner initials
+                <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="card-assignee">
+                  Assignee
+                </label>
+                <select
+                  id="card-assignee"
+                  name="assignee"
+                  className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                  value={newCardAssigneeId}
+                  onChange={(event) => setNewCardAssigneeId(event.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {board?.members.map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.displayName || member.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="card-labels">
+                  Labels
                 </label>
                 <input
-                  id="card-owner"
-                  name="owner"
-                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm uppercase outline-none focus:border-slate-950"
-                  maxLength={3}
-                  value={newCardOwner}
-                  onChange={(event) => setNewCardOwner(event.target.value)}
+                  id="card-labels"
+                  name="labels"
+                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                  value={newCardLabels}
+                  onChange={(event) => setNewCardLabels(event.target.value)}
                 />
               </div>
             </div>
@@ -2629,14 +3155,19 @@ function SortableCard({
           <span className="mt-1 block text-sm font-medium leading-5 text-slate-900">{card.title}</span>
         </span>
         <span className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
-          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5" aria-label={`Owner ${card.owner}`}>
+          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5" aria-label={`Assignee ${cardAssigneeText(card)}`}>
             <UserRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-            {card.owner}
+            <span className="max-w-32 truncate">{cardAssigneeText(card)}</span>
           </span>
           <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
             <PriorityIcon priority={card.priority} />
           </span>
           <DueBadge due={card.due} />
+          {card.labels.map((label) => (
+            <span key={label.id} className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-50 px-1.5 text-slate-600">
+              {label.name}
+            </span>
+          ))}
         </span>
       </button>
     </article>
@@ -2658,91 +3189,98 @@ function DueBadge({ due, prefix = false }: { due: string; prefix?: boolean }) {
   );
 }
 
-function PlanningCardRow({
-  card,
-  sprintOptions,
-  sprintId,
-  onSprintChange,
-  onAssign,
-}: {
-  card: Card;
-  sprintOptions: Sprint[];
-  sprintId: string;
-  onSprintChange: (sprintId: string) => void;
-  onAssign: () => void;
-}) {
-  const selectId = `planning-sprint-${card.id}`;
+function LabelList({ labels }: { labels: CardLabel[] }) {
+  return labels.length ? (
+    <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Card labels">
+      {labels.map((label) => (
+        <span key={label.id} className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-medium text-slate-600">
+          {label.name}
+        </span>
+      ))}
+    </div>
+  ) : null;
+}
+
+function PlanningDropZone({ id, label, className, children }: { id: string; label: string; className: string; children: ReactNode }) {
+  const { isOver, setNodeRef } = useDroppable({ id });
 
   return (
-    <article className="grid gap-3 rounded-md border border-slate-200 bg-white p-3 md:grid-cols-[minmax(0,1fr)_18rem] md:items-center">
+    <section
+      ref={setNodeRef}
+      className={`${className} ${isOver ? 'ring-2 ring-slate-950 ring-offset-2' : ''}`}
+      aria-label={label}
+      role="region"
+    >
+      {children}
+    </section>
+  );
+}
+
+function PlanningCardRow({ card }: { card: Card }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: planningCardDragId(card.id) });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.65 : 1,
+  };
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-md border border-slate-200 bg-white p-3 shadow-sm ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+      aria-label={`Planning card ${card.title}`}
+      {...listeners}
+      {...attributes}
+    >
       <div className="min-w-0">
-        <p className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <p className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</p>
+          {card.boardName ? (
+            <span className="inline-flex h-5 items-center rounded border border-slate-200 bg-slate-50 px-1.5 text-xs text-slate-500">
+              {card.boardName}
+            </span>
+          ) : null}
+        </div>
         <h3 className="mt-1 text-sm font-medium text-slate-950">{card.title}</h3>
         <p className="mt-1 line-clamp-2 text-sm text-slate-500">{card.description}</p>
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
           <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5">
             <UserRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-            {card.owner}
+            <span className="max-w-40 truncate">{cardAssigneeText(card)}</span>
           </span>
           <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
             <PriorityIcon priority={card.priority} />
           </span>
           <DueBadge due={card.due} />
+          {card.labels.map((label) => (
+            <span key={label.id} className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-50 px-1.5 text-slate-600">
+              {label.name}
+            </span>
+          ))}
         </div>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] md:grid-cols-1">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor={selectId}>
-            Sprint for {card.title}
-          </label>
-          <select
-            id={selectId}
-            className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
-            value={sprintId}
-            onChange={(event) => onSprintChange(event.target.value)}
-            disabled={!sprintOptions.length}
-          >
-            {sprintOptions.length ? (
-              sprintOptions.map((sprint) => (
-                <option key={sprint.id} value={sprint.id}>
-                  {sprint.name}
-                </option>
-              ))
-            ) : (
-              <option value="">No sprints</option>
-            )}
-          </select>
-        </div>
-        <button
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
-          type="button"
-          aria-label={`Assign ${card.title}`}
-          onClick={onAssign}
-          disabled={!sprintOptions.length}
-        >
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          Assign
-        </button>
       </div>
     </article>
   );
 }
 
-function SprintPlanBlock({
+function PlanningSprintLane({
   plan,
-  action,
   onStart,
   onComplete,
 }: {
   plan: SprintPlan;
-  action: 'start' | 'complete' | 'none';
   onStart?: (sprint: Sprint) => void;
   onComplete?: (sprint: Sprint) => void;
 }) {
   const cardCount = plan.cards.length;
+  const status = sprintStatusDisplay(plan.sprint.status);
 
   return (
-    <article className="rounded-md border border-slate-200 bg-white p-3">
+    <PlanningDropZone
+      id={planningSprintDropId(plan.sprint.id)}
+      label={`${status.label} sprint ${plan.sprint.name}`}
+      className={`flex min-h-[22rem] flex-col rounded-md border p-3 ${status.containerClass}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-slate-950">{plan.sprint.name}</h3>
@@ -2752,27 +3290,25 @@ function SprintPlanBlock({
             {sprintWindow(plan.sprint)}
           </p>
         </div>
-        <span className="shrink-0 rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">
-          {cardCount} {cardCount === 1 ? 'card' : 'cards'}
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <span className={`rounded px-2 py-1 text-xs font-medium ${status.badgeClass}`}>{status.label}</span>
+          <span className="rounded bg-white px-2 py-1 text-xs text-slate-500">
+            {cardCount} {cardCount === 1 ? 'card' : 'cards'}
+          </span>
+        </div>
       </div>
 
       {plan.cards.length ? (
-        <ul className="mt-3 space-y-2">
-          {plan.cards.map((card) => (
-            <li key={card.id} className="rounded-md border border-slate-100 bg-slate-50 px-2 py-2">
-              <p className="text-sm font-medium text-slate-800">{card.title}</p>
-              <p className="mt-1">
-                <DueBadge due={card.due} />
-              </p>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-3 flex-1 space-y-2">
+          {plan.cards.map((card) => <PlanningCardRow key={card.id} card={card} />)}
+        </div>
       ) : (
-        <p className="mt-3 rounded-md border border-dashed border-slate-200 px-3 py-4 text-sm text-slate-500">No assigned cards yet.</p>
+        <p className="mt-3 flex flex-1 items-center justify-center rounded-md border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-500">
+          No assigned cards yet.
+        </p>
       )}
 
-      {action === 'start' ? (
+      {plan.sprint.status === 'planned' ? (
         <button
           className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
           type="button"
@@ -2784,7 +3320,7 @@ function SprintPlanBlock({
         </button>
       ) : null}
 
-      {action === 'complete' ? (
+      {plan.sprint.status === 'active' ? (
         <button
           className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-xs font-medium text-white hover:bg-emerald-800"
           type="button"
@@ -2795,7 +3331,7 @@ function SprintPlanBlock({
           Complete
         </button>
       ) : null}
-    </article>
+    </PlanningDropZone>
   );
 }
 
@@ -2828,8 +3364,8 @@ function NavButton({
   );
 }
 
-function planningDashboardURL(boardId: string) {
-  return `/api/planning?boardId=${encodeURIComponent(boardId)}`;
+function planningDashboardURL(teamId: string) {
+  return `/api/planning?teamId=${encodeURIComponent(teamId)}`;
 }
 
 async function getJSON<T>(url: string): Promise<T> {
@@ -2857,11 +3393,14 @@ async function requestJSON<T>(url: string, init: RequestInit): Promise<T> {
 function normalizeBoard(board: Board): Board {
   return {
     ...board,
+    teamId: board.teamId ?? '',
+    members: sortWorkspaceMembers(board.members ?? []),
+    labels: sortLabels(board.labels ?? []),
     columns: [...(board.columns ?? [])]
       .sort((left, right) => left.position - right.position)
       .map((column) => ({
         ...column,
-        cards: [...(column.cards ?? [])].sort((left, right) => left.position - right.position),
+        cards: [...(column.cards ?? [])].map(normalizeCard).sort((left, right) => left.position - right.position),
       })),
     wikiPages: (board.wikiPages ?? []).map((page) => ({
       ...page,
@@ -2870,17 +3409,34 @@ function normalizeBoard(board: Board): Board {
   };
 }
 
+export function normalizeCard(card: Card): Card {
+  return {
+    ...card,
+    boardId: card.boardId ?? '',
+    boardName: card.boardName ?? '',
+    sprintId: card.sprintId ?? '',
+    assigneeId: card.assigneeId ?? '',
+    assigneeName: card.assigneeName ?? '',
+    assigneeEmail: card.assigneeEmail ?? '',
+    labels: sortLabels(card.labels ?? []),
+  };
+}
+
 function normalizeCardDetail(detail: CardDetail): CardDetail {
   return {
     ...detail,
+    card: normalizeCard(detail.card),
     comments: detail.comments ?? [],
     activity: detail.activity ?? [],
   };
 }
 
-function normalizePlanningDashboard(dashboard: PlanningDashboard): PlanningDashboard {
+export function normalizePlanningDashboard(dashboard: PlanningDashboard): PlanningDashboard {
   return {
     boardId: dashboard.boardId ?? '',
+    teamId: dashboard.teamId ?? '',
+    teamName: dashboard.teamName ?? '',
+    boards: sortBoardSummaries(dashboard.boards ?? []),
     backlog: sortCards(dashboard.backlog ?? []),
     activeSprint: dashboard.activeSprint ? normalizeSprintPlan(dashboard.activeSprint) : null,
     plannedSprints: sortSprintPlans((dashboard.plannedSprints ?? []).map(normalizeSprintPlan)),
@@ -2888,19 +3444,36 @@ function normalizePlanningDashboard(dashboard: PlanningDashboard): PlanningDashb
   };
 }
 
-function normalizeSprintPlan(plan: SprintPlan): SprintPlan {
+export function normalizeSprintPlan(plan: SprintPlan): SprintPlan {
   return {
-    sprint: plan.sprint,
+    sprint: normalizeSprint(plan.sprint),
     cards: sortCards(plan.cards ?? []),
   };
 }
 
-function addSprintToDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+export function normalizeSprint(sprint: Sprint): Sprint {
+  return {
+    ...sprint,
+    teamId: sprint.teamId ?? '',
+    boardId: sprint.boardId ?? '',
+    goal: sprint.goal ?? '',
+  };
+}
+
+function normalizeTeam(team: Team): Team {
+  return {
+    ...team,
+    members: sortTeamMembers(team.members ?? []),
+  };
+}
+
+export function addSprintToDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
   const current = normalizePlanningDashboard(dashboard);
-  const existing = current.plannedSprints.some((plan) => plan.sprint.id === sprint.id);
+  const nextSprint = normalizeSprint(sprint);
+  const existing = current.plannedSprints.some((plan) => plan.sprint.id === nextSprint.id);
   const plannedSprints = existing
-    ? current.plannedSprints.map((plan) => (plan.sprint.id === sprint.id ? { ...plan, sprint } : plan))
-    : [...current.plannedSprints, { sprint, cards: [] }];
+    ? current.plannedSprints.map((plan) => (plan.sprint.id === nextSprint.id ? { ...plan, sprint: nextSprint } : plan))
+    : [...current.plannedSprints, { sprint: nextSprint, cards: [] }];
 
   return {
     ...current,
@@ -2908,10 +3481,13 @@ function addSprintToDashboard(dashboard: PlanningDashboard, sprint: Sprint): Pla
   };
 }
 
-function assignCardInDashboard(dashboard: PlanningDashboard, card: Card): PlanningDashboard {
+export function assignCardInDashboard(dashboard: PlanningDashboard, card: Card): PlanningDashboard {
   const current = normalizePlanningDashboard(dashboard);
   const next: PlanningDashboard = {
     boardId: current.boardId,
+    teamId: current.teamId,
+    teamName: current.teamName,
+    boards: current.boards,
     backlog: current.backlog.filter((candidate) => candidate.id !== card.id),
     activeSprint: current.activeSprint
       ? {
@@ -2967,42 +3543,46 @@ function assignCardInDashboard(dashboard: PlanningDashboard, card: Card): Planni
   };
 }
 
-function startSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+export function startSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
   const current = normalizePlanningDashboard(dashboard);
-  const plan = current.plannedSprints.find((candidate) => candidate.sprint.id === sprint.id) ?? { sprint, cards: [] };
+  const nextSprint = normalizeSprint(sprint);
+  const plan = current.plannedSprints.find((candidate) => candidate.sprint.id === nextSprint.id) ?? { sprint: nextSprint, cards: [] };
 
   return {
     ...current,
     activeSprint: {
       ...plan,
-      sprint,
+      sprint: nextSprint,
     },
-    plannedSprints: current.plannedSprints.filter((candidate) => candidate.sprint.id !== sprint.id),
+    plannedSprints: current.plannedSprints.filter((candidate) => candidate.sprint.id !== nextSprint.id),
   };
 }
 
-function completeSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
+export function completeSprintInDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
   const current = normalizePlanningDashboard(dashboard);
-  const completedPlan = current.activeSprint?.sprint.id === sprint.id ? current.activeSprint : { sprint, cards: [] };
-  const completedSprints = current.completedSprints.filter((candidate) => candidate.sprint.id !== sprint.id);
+  const nextSprint = normalizeSprint(sprint);
+  const completedPlan = current.activeSprint?.sprint.id === nextSprint.id ? current.activeSprint : { sprint: nextSprint, cards: [] };
+  const completedSprints = current.completedSprints.filter((candidate) => candidate.sprint.id !== nextSprint.id);
 
   return {
     ...current,
-    activeSprint: current.activeSprint?.sprint.id === sprint.id ? null : current.activeSprint,
-    completedSprints: sortSprintPlans([...completedSprints, { ...completedPlan, sprint }]),
+    activeSprint: current.activeSprint?.sprint.id === nextSprint.id ? null : current.activeSprint,
+    completedSprints: sortSprintPlans([...completedSprints, { ...completedPlan, sprint: nextSprint }]),
   };
 }
 
-function sortCards(cards: Card[]) {
-  return [...cards].sort((left, right) => left.position - right.position || left.title.localeCompare(right.title));
+export function sortCards(cards: Card[]) {
+  return [...cards].map(normalizeCard).sort((left, right) => left.position - right.position || left.title.localeCompare(right.title));
 }
 
-function sortSprintPlans(plans: SprintPlan[]) {
+export function sortSprintPlans(plans: SprintPlan[]) {
   return [...plans].sort((left, right) => {
-    const leftDate = left.sprint.startsOn || left.sprint.startedAt || left.sprint.completedAt || '';
-    const rightDate = right.sprint.startsOn || right.sprint.startedAt || right.sprint.completedAt || '';
-    return leftDate.localeCompare(rightDate) || left.sprint.name.localeCompare(right.sprint.name);
+    return sprintSortKey(left.sprint).localeCompare(sprintSortKey(right.sprint)) || left.sprint.name.localeCompare(right.sprint.name);
   });
+}
+
+export function sprintSortKey(sprint: Sprint) {
+  return sprint.startsOn || sprint.startedAt || sprint.completedAt || sprint.name || sprint.id;
 }
 
 export function sprintWindow(sprint: Sprint) {
@@ -3029,14 +3609,15 @@ function upsertBoardSummary(summaries: BoardSummary[], board: Board): BoardSumma
   const existing = summaries.find((summary) => summary.id === board.id);
   const nextSummary: BoardSummary = {
     id: board.id,
-    workspaceId: existing?.workspaceId ?? '',
+    workspaceId: board.workspaceId || existing?.workspaceId || '',
+    teamId: board.teamId || existing?.teamId || '',
     name: board.name,
     slug: board.slug,
     columnCount: board.columns.length,
     cardCount: board.columns.reduce((total, column) => total + column.cards.length, 0),
   };
 
-  return [...summaries.filter((summary) => summary.id !== board.id), nextSummary].sort((left, right) => left.name.localeCompare(right.name));
+  return sortBoardSummaries([...summaries.filter((summary) => summary.id !== board.id), nextSummary]);
 }
 
 function upsertWorkspaceMember(members: WorkspaceMember[], member: WorkspaceMember): WorkspaceMember[] {
@@ -3055,6 +3636,57 @@ function sortWorkspaceMembers(members: WorkspaceMember[]): WorkspaceMember[] {
   };
 
   return [...members].sort((left, right) => roleOrder[left.role] - roleOrder[right.role] || left.email.localeCompare(right.email));
+}
+
+function sortTeamMembers(members: TeamMember[]): TeamMember[] {
+  const roleOrder: Record<WorkspaceRole, number> = {
+    owner: 0,
+    admin: 1,
+    member: 2,
+    viewer: 3,
+  };
+
+  return [...members].sort((left, right) => roleOrder[left.role] - roleOrder[right.role] || left.displayName.localeCompare(right.displayName));
+}
+
+function sortTeams(teams: Team[]): Team[] {
+  return [...teams].map(normalizeTeam).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function sortBoardSummaries(summaries: BoardSummary[]): BoardSummary[] {
+  return [...summaries]
+    .map((summary) => ({
+      ...summary,
+      teamId: summary.teamId ?? '',
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function sortLabels(labels: CardLabel[]): CardLabel[] {
+  return [...labels].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function mergeCardLabels(labels: CardLabel[], cardLabels: CardLabel[]): CardLabel[] {
+  const next = new Map(labels.map((label) => [label.id, label]));
+  for (const label of cardLabels ?? []) {
+    next.set(label.id, label);
+  }
+  return sortLabels([...next.values()]);
+}
+
+function parseLabelText(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(',')
+    .map((label) => label.trim())
+    .filter((label) => {
+      const key = label.toLowerCase();
+      if (!label || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
 }
 
 function displayWorkspaceRole(role: WorkspaceRole) {
@@ -3077,6 +3709,7 @@ function addCardToBoard(board: Board | null, card: Card): Board | null {
 
   return normalizeBoard({
     ...board,
+    labels: mergeCardLabels(board.labels, card.labels),
     columns: board.columns.map((column) =>
       column.id === card.columnId
         ? {
@@ -3095,6 +3728,7 @@ function replaceCardInBoard(board: Board | null, card: Card): Board | null {
 
   return normalizeBoard({
     ...board,
+    labels: mergeCardLabels(board.labels, card.labels),
     columns: board.columns.map((column) => ({
       ...column,
       cards: column.cards.map((candidate) => (candidate.id === card.id ? card : candidate)),
@@ -3123,7 +3757,8 @@ function formFromCard(card: Card): CardForm {
     title: card.title,
     description: card.description,
     priority: card.priority.toLowerCase(),
-    ownerInitials: card.owner,
+    assigneeId: card.assigneeId ?? '',
+    labelText: (card.labels ?? []).map((label) => label.name).join(', '),
     due: card.due,
   };
 }
@@ -3177,6 +3812,67 @@ function findCard(board: Board, cardId: string) {
   return board.columns.flatMap((column) => column.cards).find((card) => card.id === cardId);
 }
 
+function findPlanningCard(dashboard: PlanningDashboard, cardId: string) {
+  const cards = [
+    ...dashboard.backlog,
+    ...(dashboard.activeSprint?.cards ?? []),
+    ...dashboard.plannedSprints.flatMap((plan) => plan.cards),
+    ...dashboard.completedSprints.flatMap((plan) => plan.cards),
+  ];
+  return cards.find((card) => card.id === cardId);
+}
+
+function planningCardDragId(cardId: string) {
+  return `planning-card:${cardId}`;
+}
+
+function planningCardIdFromDragId(id: string) {
+  return id.startsWith('planning-card:') ? id.slice('planning-card:'.length) : null;
+}
+
+function planningSprintDropId(sprintId: string) {
+  return `planning-sprint:${sprintId}`;
+}
+
+function sprintIdFromPlanningDropId(id: string) {
+  if (id === 'planning-backlog') {
+    return '';
+  }
+  return id.startsWith('planning-sprint:') ? id.slice('planning-sprint:'.length) : null;
+}
+
+export function resolvePlanningMoveTarget(activeId: string, overId: string) {
+  const cardId = planningCardIdFromDragId(activeId);
+  const sprintId = sprintIdFromPlanningDropId(overId);
+  if (cardId === null || sprintId === null) {
+    return null;
+  }
+  return { cardId, sprintId };
+}
+
+export function sprintStatusDisplay(status: Sprint['status']) {
+  switch (status) {
+    case 'active':
+      return {
+        label: 'Active',
+        containerClass: 'border-emerald-200 bg-emerald-50/60',
+        badgeClass: 'bg-emerald-100 text-emerald-700',
+      };
+    case 'completed':
+      return {
+        label: 'Completed',
+        containerClass: 'border-slate-200 bg-slate-50',
+        badgeClass: 'bg-slate-200 text-slate-600',
+      };
+    default:
+      return {
+        label: 'Planned',
+        containerClass: 'border-slate-200 bg-white',
+        badgeClass: 'bg-slate-100 text-slate-600',
+      };
+  }
+}
+
 function priorityChipClass(priority: Priority) {
   const base = 'inline-flex h-6 w-6 items-center justify-center rounded-md border';
   switch (priority) {
@@ -3204,7 +3900,7 @@ function PriorityIcon({ priority }: { priority: Priority }) {
   }
 }
 
-function dueStatus(due: string) {
+export function dueStatus(due: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due);
   if (!match) {
     return {
@@ -3236,7 +3932,7 @@ function dueStatus(due: string) {
   };
 }
 
-function columnAccent(position: number) {
+export function columnAccent(position: number) {
   switch (position) {
     case 0:
       return 'bg-sky-500';
@@ -3247,13 +3943,55 @@ function columnAccent(position: number) {
   }
 }
 
-function cardMatchesSearch(card: Card, search: string) {
-  return [card.title, card.owner, card.priority, card.due].some((value) => value.toLowerCase().includes(search));
+export function cardMatchesSearch(card: Card, search: string) {
+  if (!search) {
+    return true;
+  }
+  return [
+    card.title,
+    card.assigneeName,
+    card.assigneeEmail,
+    card.priority,
+    card.due,
+    ...card.labels.map((label) => label.name),
+  ].some((value) => value.toLowerCase().includes(search));
 }
 
-function ownerInitials(value: string) {
-  const owner = value.trim().toUpperCase();
-  return owner || 'ME';
+export function hasActiveBoardFilters(filters: BoardFilters) {
+  return filters.assigneeId !== 'all' || filters.labelId !== 'all' || filters.priority !== 'all' || filters.dueStatus !== 'all';
+}
+
+export function cardMatchesFilters(card: Card, filters: BoardFilters) {
+  if (filters.assigneeId === 'unassigned' && card.assigneeId) {
+    return false;
+  }
+  if (filters.assigneeId !== 'all' && filters.assigneeId !== 'unassigned' && card.assigneeId !== filters.assigneeId) {
+    return false;
+  }
+  if (filters.labelId === 'none' && card.labels.length > 0) {
+    return false;
+  }
+  if (filters.labelId !== 'all' && filters.labelId !== 'none' && !card.labels.some((label) => label.id === filters.labelId)) {
+    return false;
+  }
+  if (filters.priority !== 'all' && card.priority.toLowerCase() !== filters.priority) {
+    return false;
+  }
+  if (filters.dueStatus !== 'all' && dueStatus(card.due).label !== filters.dueStatus) {
+    return false;
+  }
+  return true;
+}
+
+export function cardAssigneeText(card: Card) {
+  return card.assigneeName || card.assigneeEmail || 'Unassigned';
+}
+
+export function defaultAssigneeId(board: Board | null, currentUser: CurrentUser | null) {
+  if (!board || !currentUser) {
+    return '';
+  }
+  return board.members.some((member) => member.userId === currentUser.id) ? currentUser.id : '';
 }
 
 function WikiPageTree({

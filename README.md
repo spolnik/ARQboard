@@ -14,6 +14,7 @@ This repo now contains the Go service, database-backed board API, and React web 
 - `serve` applies embedded migrations before it starts accepting traffic; `migrate` remains available as an explicit pre-flight command.
 - CLI-created admin users can sign in through DB-backed HTTP-only sessions.
 - A seeded default workspace board with persisted columns, cards, card creation, and card movement.
+- Structured card metadata with named workspace-member assignees, labels, and board filters for focused views.
 - Sprint planning with named board-scoped sprints, backlog assignment, one active sprint per board, and explicit close-sprint rollover choices.
 - Authenticated JSON API endpoints for boards, card creation, card moves, sprint planning, card detail, comments, and wiki pages.
 - Local stdio MCP server for board, card, and wiki planning tools.
@@ -27,7 +28,7 @@ For local development, ARQboard defaults to a file-backed SQLite database at `da
 
 ```bash
 make migrate-up
-go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple"
+go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple" --name "Admin"
 cd web && npm install && npm test && npm run build
 make dev
 ```
@@ -47,7 +48,7 @@ Useful direct commands:
 go test ./...
 cd web && npm test
 go run ./cmd/arqboard migrate
-go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple"
+go run ./cmd/arqboard admin create-user --email admin@example.com --password "correct horse battery staple" --name "Admin"
 go run ./cmd/arqboard serve
 go run ./cmd/arqboard mcp
 ```

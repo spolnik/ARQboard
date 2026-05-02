@@ -63,21 +63,19 @@ type searchColumnRef struct {
 }
 
 type createCardInput struct {
-	ColumnID      string `json:"columnId" jsonschema:"UUID of the column where the card should be created."`
-	Title         string `json:"title" jsonschema:"Card title."`
-	Description   string `json:"description,omitempty" jsonschema:"Optional card description."`
-	Priority      string `json:"priority,omitempty" jsonschema:"Optional priority: low, normal, high, or urgent."`
-	OwnerInitials string `json:"ownerInitials,omitempty" jsonschema:"Optional owner initials."`
-	Due           string `json:"due,omitempty" jsonschema:"Optional due date in YYYY-MM-DD format."`
+	ColumnID    string `json:"columnId" jsonschema:"UUID of the column where the card should be created."`
+	Title       string `json:"title" jsonschema:"Card title."`
+	Description string `json:"description,omitempty" jsonschema:"Optional card description."`
+	Priority    string `json:"priority,omitempty" jsonschema:"Optional priority: low, normal, high, or urgent."`
+	Due         string `json:"due,omitempty" jsonschema:"Optional due date in YYYY-MM-DD format."`
 }
 
 type updateCardInput struct {
-	CardID        string `json:"cardId" jsonschema:"UUID of the card to update."`
-	Title         string `json:"title" jsonschema:"Updated card title."`
-	Description   string `json:"description" jsonschema:"Updated card description."`
-	Priority      string `json:"priority,omitempty" jsonschema:"Priority: low, normal, high, or urgent."`
-	OwnerInitials string `json:"ownerInitials,omitempty" jsonschema:"Owner initials."`
-	Due           string `json:"due,omitempty" jsonschema:"Due date in YYYY-MM-DD format."`
+	CardID      string `json:"cardId" jsonschema:"UUID of the card to update."`
+	Title       string `json:"title" jsonschema:"Updated card title."`
+	Description string `json:"description" jsonschema:"Updated card description."`
+	Priority    string `json:"priority,omitempty" jsonschema:"Priority: low, normal, high, or urgent."`
+	Due         string `json:"due,omitempty" jsonschema:"Due date in YYYY-MM-DD format."`
 }
 
 type moveCardInput struct {
@@ -143,12 +141,11 @@ func New(store Store) *sdkmcp.Server {
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "arqboard_create_card",
-		Description: "Create a card in a column, optionally setting description, priority, owner, and due date.",
+		Description: "Create a card in a column, optionally setting description, priority, and due date.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input createCardInput) (*sdkmcp.CallToolResult, db.BoardCard, error) {
 		card, err := store.CreateCard(ctx, db.CreateCardParams{
-			ColumnID:      input.ColumnID,
-			Title:         input.Title,
-			OwnerInitials: input.OwnerInitials,
+			ColumnID: input.ColumnID,
+			Title:    input.Title,
 		})
 		if err != nil || !createCardNeedsUpdate(input) {
 			return nil, card, err
@@ -158,27 +155,25 @@ func New(store Store) *sdkmcp.Server {
 			due = card.Due
 		}
 		card, err = store.UpdateCard(ctx, db.UpdateCardParams{
-			CardID:        card.ID,
-			Title:         input.Title,
-			Description:   input.Description,
-			Priority:      input.Priority,
-			OwnerInitials: input.OwnerInitials,
-			Due:           due,
+			CardID:      card.ID,
+			Title:       input.Title,
+			Description: input.Description,
+			Priority:    input.Priority,
+			Due:         due,
 		})
 		return nil, card, err
 	})
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "arqboard_update_card",
-		Description: "Update card title, description, priority, owner, and due date.",
+		Description: "Update card title, description, priority, and due date.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input updateCardInput) (*sdkmcp.CallToolResult, db.BoardCard, error) {
 		card, err := store.UpdateCard(ctx, db.UpdateCardParams{
-			CardID:        input.CardID,
-			Title:         input.Title,
-			Description:   input.Description,
-			Priority:      input.Priority,
-			OwnerInitials: input.OwnerInitials,
-			Due:           input.Due,
+			CardID:      input.CardID,
+			Title:       input.Title,
+			Description: input.Description,
+			Priority:    input.Priority,
+			Due:         input.Due,
 		})
 		return nil, card, err
 	})
@@ -308,7 +303,8 @@ func cardMatchesTerms(board db.Board, column db.BoardColumn, card db.BoardCard, 
 		column.Title,
 		card.Title,
 		card.Description,
-		card.Owner,
+		card.AssigneeName,
+		card.AssigneeEmail,
 		card.Priority,
 		card.Due,
 	}, " "))

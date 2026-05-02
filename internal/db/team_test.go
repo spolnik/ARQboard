@@ -84,17 +84,26 @@ func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
 
 	store := TeamStore{Conn: boardStore.Conn}
 	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
-		Email:    "person@example.com",
-		Password: "correct horse battery member",
-		Role:     "manager",
+		Email:       "person@example.com",
+		DisplayName: "Person",
+		Password:    "correct horse battery member",
+		Role:        "manager",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("invalid create role error = %v, want ErrValidation", err)
 	}
 	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
-		Email: "person@example.com",
-		Role:  "member",
+		Email:       "person@example.com",
+		DisplayName: "Person",
+		Role:        "member",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("missing password error = %v, want ErrValidation", err)
+	}
+	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:    "person@example.com",
+		Password: "correct horse battery member",
+		Role:     "member",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing display name error = %v, want ErrValidation", err)
 	}
 	if _, err := store.UpdateWorkspaceMember(ctx, UpdateWorkspaceMemberParams{
 		MemberID: "missing",

@@ -62,6 +62,9 @@ type AuthStore interface {
 }
 
 type TeamStore interface {
+	ListTeams(context.Context) ([]db.Team, error)
+	CreateTeam(context.Context, db.CreateTeamParams) (db.Team, error)
+	AddTeamMember(context.Context, db.AddTeamMemberParams) (db.Team, error)
 	ListWorkspaceMembers(context.Context) ([]db.WorkspaceMember, error)
 	CreateWorkspaceMember(context.Context, db.CreateWorkspaceMemberParams) (db.WorkspaceMember, error)
 	UpdateWorkspaceMember(context.Context, db.UpdateWorkspaceMemberParams) (db.WorkspaceMember, error)
@@ -101,6 +104,9 @@ func NewRouter(opts Options) http.Handler {
 				r.Use(requireAuth(opts.AuthStore))
 			}
 			r.Get("/workspaces", listWorkspaces(opts.BoardStore))
+			r.Get("/teams", listTeams(opts.TeamStore))
+			r.Post("/teams", createTeam(opts.TeamStore))
+			r.Post("/teams/{teamID}/members", addTeamMember(opts.TeamStore))
 			r.Get("/boards", listBoards(opts.BoardStore))
 			r.Post("/boards", createBoard(opts.BoardStore))
 			r.Get("/boards/default", defaultBoard(opts.BoardStore))
@@ -144,13 +150,24 @@ func NewRouter(opts Options) http.Handler {
 }
 
 type createCardRequest struct {
-	ColumnID      string `json:"columnId"`
-	Title         string `json:"title"`
-	OwnerInitials string `json:"ownerInitials"`
+	ColumnID   string   `json:"columnId"`
+	Title      string   `json:"title"`
+	AssigneeID string   `json:"assigneeId"`
+	LabelNames []string `json:"labelNames"`
 }
 
 type boardRequest struct {
+	Name   string `json:"name"`
+	TeamID string `json:"teamId"`
+}
+
+type teamRequest struct {
 	Name string `json:"name"`
+}
+
+type teamMemberRequest struct {
+	UserID string `json:"userId"`
+	Role   string `json:"role"`
 }
 
 type columnRequest struct {
@@ -158,11 +175,12 @@ type columnRequest struct {
 }
 
 type updateCardRequest struct {
-	Title         string `json:"title"`
-	Description   string `json:"description"`
-	Priority      string `json:"priority"`
-	OwnerInitials string `json:"ownerInitials"`
-	Due           string `json:"due"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Priority    string   `json:"priority"`
+	AssigneeID  *string  `json:"assigneeId"`
+	Due         string   `json:"due"`
+	LabelNames  []string `json:"labelNames"`
 }
 
 type moveCardRequest struct {
@@ -172,6 +190,7 @@ type moveCardRequest struct {
 
 type sprintRequest struct {
 	BoardID  string `json:"boardId"`
+	TeamID   string `json:"teamId"`
 	Name     string `json:"name"`
 	Goal     string `json:"goal"`
 	StartsOn string `json:"startsOn"`
@@ -391,6 +410,81 @@ func listBoards(store BoardStore) http.HandlerFunc {
 	}
 }
 
+func listTeams(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		teams, err := store.ListTeams(r.Context())
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, teams)
+	}
+}
+
+func createTeam(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		var payload teamRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Name) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_team", "name is required")
+			return
+		}
+
+		team, err := store.CreateTeam(r.Context(), db.CreateTeamParams{Name: payload.Name})
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, team)
+	}
+}
+
+func addTeamMember(store TeamStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
+			return
+		}
+
+		var payload teamMemberRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.UserID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_team_member", "userId is required")
+			return
+		}
+
+		team, err := store.AddTeamMember(r.Context(), db.AddTeamMemberParams{
+			TeamID: chi.URLParam(r, "teamID"),
+			UserID: payload.UserID,
+			Role:   payload.Role,
+		})
+		if err != nil {
+			writeTeamStoreError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, team)
+	}
+}
+
 func boardByID(store BoardStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -425,7 +519,7 @@ func createBoard(store BoardStore) http.HandlerFunc {
 			return
 		}
 
-		board, err := store.CreateBoard(r.Context(), db.CreateBoardParams{Name: payload.Name})
+		board, err := store.CreateBoard(r.Context(), db.CreateBoardParams{Name: payload.Name, TeamID: payload.TeamID})
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -472,7 +566,11 @@ func planningDashboard(store BoardStore) http.HandlerFunc {
 			return
 		}
 
-		dashboard, err := store.GetPlanningDashboard(r.Context(), r.URL.Query().Get("boardId"))
+		scopeID := r.URL.Query().Get("teamId")
+		if scopeID == "" {
+			scopeID = r.URL.Query().Get("boardId")
+		}
+		dashboard, err := store.GetPlanningDashboard(r.Context(), scopeID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -501,6 +599,7 @@ func createSprint(store BoardStore) http.HandlerFunc {
 
 		sprint, err := store.CreateSprint(r.Context(), db.CreateSprintParams{
 			BoardID:  payload.BoardID,
+			TeamID:   payload.TeamID,
 			Name:     payload.Name,
 			Goal:     payload.Goal,
 			StartsOn: payload.StartsOn,
@@ -615,9 +714,10 @@ func createCard(store BoardStore) http.HandlerFunc {
 		}
 
 		card, err := store.CreateCard(r.Context(), db.CreateCardParams{
-			ColumnID:      payload.ColumnID,
-			Title:         payload.Title,
-			OwnerInitials: payload.OwnerInitials,
+			ColumnID:   payload.ColumnID,
+			Title:      payload.Title,
+			AssigneeID: payload.AssigneeID,
+			LabelNames: payload.LabelNames,
 		})
 		if err != nil {
 			writeStoreError(w, r, err)
@@ -663,12 +763,13 @@ func updateCard(store BoardStore) http.HandlerFunc {
 		}
 
 		card, err := store.UpdateCard(r.Context(), db.UpdateCardParams{
-			CardID:        chi.URLParam(r, "cardID"),
-			Title:         payload.Title,
-			Description:   payload.Description,
-			Priority:      payload.Priority,
-			OwnerInitials: payload.OwnerInitials,
-			Due:           payload.Due,
+			CardID:      chi.URLParam(r, "cardID"),
+			Title:       payload.Title,
+			Description: payload.Description,
+			Priority:    payload.Priority,
+			AssigneeID:  payload.AssigneeID,
+			Due:         payload.Due,
+			LabelNames:  payload.LabelNames,
 		})
 		if err != nil {
 			writeStoreError(w, r, err)

@@ -107,26 +107,24 @@ func TestMCPServerCreatesAndUpdatesPlanningCards(t *testing.T) {
 	}
 
 	card := callTool[db.BoardCard](t, ctx, session, "arqboard_create_card", map[string]any{
-		"columnId":      createdBoard.Columns[0].ID,
-		"title":         "Plan with MCP",
-		"description":   "Let an MCP client create and update ARQboard planning work.",
-		"priority":      "high",
-		"ownerInitials": "AI",
-		"due":           "2026-05-08",
+		"columnId":    createdBoard.Columns[0].ID,
+		"title":       "Plan with MCP",
+		"description": "Let an MCP client create and update ARQboard planning work.",
+		"priority":    "high",
+		"due":         "2026-05-08",
 	})
-	if card.Title != "Plan with MCP" || card.Priority != "High" || card.Owner != "AI" {
+	if card.Title != "Plan with MCP" || card.Priority != "High" || card.Owner != "" {
 		t.Fatalf("created card = %#v, want updated planning card", card)
 	}
 
 	updated := callTool[db.BoardCard](t, ctx, session, "arqboard_update_card", map[string]any{
-		"cardId":        card.ID,
-		"title":         "Plan ARQboard with MCP",
-		"description":   "MCP clients can now manage boards and cards through the local server.",
-		"priority":      "urgent",
-		"ownerInitials": "OPS",
-		"due":           "2026-05-15",
+		"cardId":      card.ID,
+		"title":       "Plan ARQboard with MCP",
+		"description": "MCP clients can now manage boards and cards through the local server.",
+		"priority":    "urgent",
+		"due":         "2026-05-15",
 	})
-	if updated.Title != "Plan ARQboard with MCP" || updated.Priority != "Urgent" || updated.Owner != "OPS" {
+	if updated.Title != "Plan ARQboard with MCP" || updated.Priority != "Urgent" || updated.Owner != "" {
 		t.Fatalf("updated card = %#v, want persisted MCP update", updated)
 	}
 
