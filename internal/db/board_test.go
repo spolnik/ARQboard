@@ -2,12 +2,49 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/spolnik/arqboard/migrations"
 )
+
+func TestDatabaseHelperFormatting(t *testing.T) {
+	if got := timeText(DriverPostgres, "created_at"); got != "created_at::text" {
+		t.Fatalf("postgres timeText = %q, want cast", got)
+	}
+	if got := timeText(DriverSQLite, "created_at"); got != "created_at" {
+		t.Fatalf("sqlite timeText = %q, want column", got)
+	}
+	if got := jsonPlaceholder(DriverPostgres, 2); got != "$2::jsonb" {
+		t.Fatalf("postgres jsonPlaceholder = %q, want $2::jsonb", got)
+	}
+	if got := jsonPlaceholder(DriverSQLite, 2); got != "?" {
+		t.Fatalf("sqlite jsonPlaceholder = %q, want ?", got)
+	}
+	if got := placeholder(DriverPostgres, 3); got != "$3" {
+		t.Fatalf("postgres placeholder = %q, want $3", got)
+	}
+	if got := placeholders(DriverPostgres, 3); got != "$1, $2, $3" {
+		t.Fatalf("postgres placeholders = %q, want three placeholders", got)
+	}
+	if got := placeholders(DriverSQLite, 2); got != "?, ?" {
+		t.Fatalf("sqlite placeholders = %q, want two placeholders", got)
+	}
+	if err := notFoundOrErr(sql.ErrNoRows); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("notFoundOrErr(sql.ErrNoRows) = %v, want ErrNotFound", err)
+	}
+	if err := notFoundOrErr(context.Canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("notFoundOrErr(context.Canceled) = %v, want context.Canceled", err)
+	}
+	if got := truthLiteral(DriverPostgres); got != "true" {
+		t.Fatalf("postgres truthLiteral = %q, want true", got)
+	}
+	if got := truthLiteral(DriverSQLite); got != "1" {
+		t.Fatalf("sqlite truthLiteral = %q, want 1", got)
+	}
+}
 
 func TestDefaultBoardSeedsOnceAndPersistsCardMoves(t *testing.T) {
 	ctx := context.Background()

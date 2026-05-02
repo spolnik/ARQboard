@@ -392,6 +392,72 @@ func TestRouterManagesWorkspaceMembersForAdmins(t *testing.T) {
 	}
 }
 
+func TestRouterManagesTeamsForAdmins(t *testing.T) {
+	store := &fakeTeamStore{
+		teams: []db.Team{
+			{
+				ID:          "team-1",
+				WorkspaceID: "workspace-1",
+				Name:        "Platform Engineering",
+				Slug:        "platform-engineering",
+				Members: []db.TeamMember{
+					{ID: "team-member-1", TeamID: "team-1", UserID: "user-1", Email: "admin@example.com", DisplayName: "Admin", Role: "owner", IsAdmin: true},
+				},
+			},
+		},
+		team: db.Team{
+			ID:          "team-2",
+			WorkspaceID: "workspace-1",
+			Name:        "Design Systems",
+			Slug:        "design-systems",
+			Members: []db.TeamMember{
+				{ID: "team-member-2", TeamID: "team-2", UserID: "user-2", Email: "dev@example.com", DisplayName: "Dev", Role: "admin"},
+			},
+		},
+	}
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: testUser()},
+		TeamStore: store,
+	})
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/teams", nil)
+	listReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	list := httptest.NewRecorder()
+	router.ServeHTTP(list, listReq)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", list.Code, http.StatusOK)
+	}
+	var teams []db.Team
+	if err := json.NewDecoder(list.Body).Decode(&teams); err != nil {
+		t.Fatalf("Decode teams returned error: %v", err)
+	}
+	if len(teams) != 1 || teams[0].Name != "Platform Engineering" || len(teams[0].Members) != 1 {
+		t.Fatalf("teams = %#v, want platform team with admin member", teams)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/teams", bytes.NewBufferString(`{"name":"Design Systems"}`))
+	createReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, createReq)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", create.Code, http.StatusCreated)
+	}
+	if store.createdTeam.Name != "Design Systems" {
+		t.Fatalf("created team params = %#v, want Design Systems", store.createdTeam)
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/teams/team-2/members", bytes.NewBufferString(`{"userId":"user-2","role":"admin"}`))
+	addReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	add := httptest.NewRecorder()
+	router.ServeHTTP(add, addReq)
+	if add.Code != http.StatusOK {
+		t.Fatalf("add member status = %d, want %d", add.Code, http.StatusOK)
+	}
+	if store.teamMember.TeamID != "team-2" || store.teamMember.UserID != "user-2" || store.teamMember.Role != "admin" {
+		t.Fatalf("team member params = %#v, want team-2 user-2 admin", store.teamMember)
+	}
+}
+
 func TestRouterRejectsWorkspaceMemberManagementForNonAdmins(t *testing.T) {
 	user := testUser()
 	user.IsAdmin = false
@@ -430,6 +496,38 @@ func TestRouterValidatesWorkspaceMemberPayloads(t *testing.T) {
 		{name: "create member bad json", method: http.MethodPost, path: "/api/members", body: `{`},
 		{name: "update member missing role", method: http.MethodPatch, path: "/api/members/member-2", body: `{}`},
 		{name: "update member bad json", method: http.MethodPatch, path: "/api/members/member-2", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestRouterValidatesTeamPayloads(t *testing.T) {
+	router := NewRouter(Options{
+		AuthStore: &fakeAuthStore{user: testUser()},
+		TeamStore: &fakeTeamStore{},
+	})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create team missing name", method: http.MethodPost, path: "/api/teams", body: `{}`},
+		{name: "create team bad json", method: http.MethodPost, path: "/api/teams", body: `{`},
+		{name: "add team member missing user", method: http.MethodPost, path: "/api/teams/team-1/members", body: `{"role":"member"}`},
+		{name: "add team member bad json", method: http.MethodPost, path: "/api/teams/team-1/members", body: `{`},
 	}
 
 	for _, tt := range tests {
@@ -915,6 +1013,7 @@ type fakeTeamStore struct {
 	teams         []db.Team
 	team          db.Team
 	teamMember    db.AddTeamMemberParams
+	createdTeam   db.CreateTeamParams
 	members       []db.WorkspaceMember
 	member        db.WorkspaceMember
 	updated       db.WorkspaceMember
@@ -961,6 +1060,7 @@ func (store *fakeTeamStore) ListTeams(context.Context) ([]db.Team, error) {
 }
 
 func (store *fakeTeamStore) CreateTeam(_ context.Context, params db.CreateTeamParams) (db.Team, error) {
+	store.createdTeam = params
 	if store.err != nil {
 		return db.Team{}, store.err
 	}
