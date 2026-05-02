@@ -11,6 +11,7 @@ import (
 type Sprint struct {
 	ID          string `json:"id"`
 	WorkspaceID string `json:"workspaceId"`
+	TeamID      string `json:"teamId"`
 	BoardID     string `json:"boardId"`
 	Name        string `json:"name"`
 	Goal        string `json:"goal"`
@@ -27,15 +28,19 @@ type SprintPlan struct {
 }
 
 type PlanningDashboard struct {
-	BoardID          string       `json:"boardId"`
-	Backlog          []BoardCard  `json:"backlog"`
-	ActiveSprint     *SprintPlan  `json:"activeSprint,omitempty"`
-	PlannedSprints   []SprintPlan `json:"plannedSprints"`
-	CompletedSprints []SprintPlan `json:"completedSprints"`
+	BoardID          string         `json:"boardId"`
+	TeamID           string         `json:"teamId"`
+	TeamName         string         `json:"teamName"`
+	Boards           []BoardSummary `json:"boards"`
+	Backlog          []BoardCard    `json:"backlog"`
+	ActiveSprint     *SprintPlan    `json:"activeSprint,omitempty"`
+	PlannedSprints   []SprintPlan   `json:"plannedSprints"`
+	CompletedSprints []SprintPlan   `json:"completedSprints"`
 }
 
 type CreateSprintParams struct {
 	BoardID  string
+	TeamID   string
 	Name     string
 	Goal     string
 	StartsOn string
@@ -57,7 +62,7 @@ type AssignCardToSprintParams struct {
 	SprintID string
 }
 
-func (store BoardStore) GetPlanningDashboard(ctx context.Context, boardID string) (PlanningDashboard, error) {
+func (store BoardStore) GetPlanningDashboard(ctx context.Context, scopeID string) (PlanningDashboard, error) {
 	sqlDB, driver, err := store.database()
 	if err != nil {
 		return PlanningDashboard{}, err
@@ -72,19 +77,12 @@ func (store BoardStore) GetPlanningDashboard(ctx context.Context, boardID string
 	if _, err := ensureDefaultBoard(ctx, tx, driver); err != nil {
 		return PlanningDashboard{}, err
 	}
-	boardID = strings.TrimSpace(boardID)
-	if boardID == "" {
-		boardID, err = ensureDefaultBoard(ctx, tx, driver)
-		if err != nil {
-			return PlanningDashboard{}, err
-		}
-	}
-	workspaceID, err := loadBoardWorkspace(ctx, tx, driver, boardID)
+	teamID, err := resolvePlanningTeam(ctx, tx, driver, scopeID)
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
 
-	dashboard, err := loadPlanningDashboard(ctx, tx, driver, workspaceID, boardID)
+	dashboard, err := loadPlanningDashboard(ctx, tx, driver, teamID)
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
@@ -96,9 +94,7 @@ func (store BoardStore) GetPlanningDashboard(ctx context.Context, boardID string
 
 func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintParams) (Sprint, error) {
 	boardID := strings.TrimSpace(params.BoardID)
-	if boardID == "" {
-		return Sprint{}, fmt.Errorf("%w: boardId is required", ErrValidation)
-	}
+	teamID := strings.TrimSpace(params.TeamID)
 	name := strings.TrimSpace(params.Name)
 	if name == "" {
 		return Sprint{}, fmt.Errorf("%w: sprint name is required", ErrValidation)
@@ -115,9 +111,33 @@ func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintPar
 	}
 	defer tx.Rollback()
 
-	workspaceID, err := loadBoardWorkspace(ctx, tx, driver, boardID)
+	var workspaceID string
+	if teamID != "" {
+		workspaceID, err = loadTeamWorkspace(ctx, tx, driver, teamID)
+		if err != nil {
+			return Sprint{}, err
+		}
+		if boardID == "" {
+			boardID, err = defaultBoardIDForTeam(ctx, tx, driver, teamID)
+			if err != nil {
+				return Sprint{}, err
+			}
+		}
+	} else {
+		if boardID == "" {
+			return Sprint{}, fmt.Errorf("%w: teamId is required", ErrValidation)
+		}
+		workspaceID, teamID, err = loadBoardScope(ctx, tx, driver, boardID)
+		if err != nil {
+			return Sprint{}, err
+		}
+	}
+	boardWorkspaceID, boardTeamID, err := loadBoardScope(ctx, tx, driver, boardID)
 	if err != nil {
 		return Sprint{}, err
+	}
+	if boardWorkspaceID != workspaceID || boardTeamID != teamID {
+		return Sprint{}, fmt.Errorf("%w: sprint board must belong to the selected team", ErrValidation)
 	}
 	sprintID, err := newID()
 	if err != nil {
@@ -125,8 +145,8 @@ func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintPar
 	}
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO sprints (id, workspace_id, board_id, name, goal, starts_on, ends_on)
-		VALUES (%s, %s, %s, %s, %s, %s, %s)
+		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, starts_on, ends_on)
+		VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
@@ -135,7 +155,8 @@ func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintPar
 		placeholder(driver, 5),
 		placeholder(driver, 6),
 		placeholder(driver, 7),
-	), sprintID, workspaceID, boardID, name, strings.TrimSpace(params.Goal), nullableString(params.StartsOn), nullableString(params.EndsOn))
+		placeholder(driver, 8),
+	), sprintID, workspaceID, teamID, boardID, name, strings.TrimSpace(params.Goal), nullableString(params.StartsOn), nullableString(params.EndsOn))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Sprint{}, fmt.Errorf("%w: sprint name already exists", ErrValidation)
@@ -178,7 +199,7 @@ func (store BoardStore) StartSprint(ctx context.Context, sprintID string) (Sprin
 		return Sprint{}, fmt.Errorf("%w: only planned sprints can be started", ErrValidation)
 	}
 
-	activeCount, err := countActiveSprints(ctx, tx, driver, sprint.BoardID)
+	activeCount, err := countActiveSprints(ctx, tx, driver, sprint.TeamID)
 	if err != nil {
 		return Sprint{}, err
 	}
@@ -304,8 +325,12 @@ func (store BoardStore) AssignCardToSprint(ctx context.Context, params AssignCar
 		if err != nil {
 			return BoardCard{}, err
 		}
-		if sprint.WorkspaceID != cardWorkspaceID || sprint.BoardID != boardID {
-			return BoardCard{}, fmt.Errorf("%w: sprint and card belong to different boards", ErrValidation)
+		_, cardTeamID, err := loadBoardScope(ctx, tx, driver, boardID)
+		if err != nil {
+			return BoardCard{}, err
+		}
+		if sprint.WorkspaceID != cardWorkspaceID || sprint.TeamID != cardTeamID {
+			return BoardCard{}, fmt.Errorf("%w: sprint and card belong to different teams", ErrValidation)
 		}
 		if sprint.Status == "completed" {
 			return BoardCard{}, fmt.Errorf("%w: completed sprints cannot accept cards", ErrValidation)
@@ -334,20 +359,56 @@ func (store BoardStore) AssignCardToSprint(ctx context.Context, params AssignCar
 	return card, nil
 }
 
-func loadPlanningDashboard(ctx context.Context, q sqlQueryer, driver Driver, _ string, boardID string) (PlanningDashboard, error) {
-	backlog, err := loadBacklogCards(ctx, q, driver, boardID)
+func resolvePlanningTeam(ctx context.Context, q sqlQueryer, driver Driver, scopeID string) (string, error) {
+	scopeID = strings.TrimSpace(scopeID)
+	if scopeID != "" {
+		if teamID, found, err := lookupID(ctx, q, driver, "SELECT id FROM teams WHERE id = "+placeholder(driver, 1), scopeID); err != nil {
+			return "", err
+		} else if found {
+			return teamID, nil
+		}
+		if teamID, found, err := lookupID(ctx, q, driver, "SELECT team_id FROM boards WHERE id = "+placeholder(driver, 1), scopeID); err != nil {
+			return "", err
+		} else if found {
+			return teamID, nil
+		}
+		return "", ErrNotFound
+	}
+
+	workspaceID, err := ensureWorkspace(ctx, q, driver)
+	if err != nil {
+		return "", err
+	}
+	return ensureDefaultTeam(ctx, q, driver, workspaceID)
+}
+
+func loadPlanningDashboard(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (PlanningDashboard, error) {
+	var teamName string
+	var workspaceID string
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT name, workspace_id
+		FROM teams
+		WHERE id = %s
+	`, placeholder(driver, 1)), teamID).Scan(&teamName, &workspaceID); err != nil {
+		return PlanningDashboard{}, notFoundOrErr(err)
+	}
+	boards, err := listBoardSummariesForTeam(ctx, q, driver, teamID)
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
-	planned, err := loadSprintPlans(ctx, q, driver, boardID, "planned")
+	backlog, err := loadBacklogCards(ctx, q, driver, teamID)
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
-	active, err := loadSprintPlans(ctx, q, driver, boardID, "active")
+	planned, err := loadSprintPlans(ctx, q, driver, teamID, "planned")
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
-	completed, err := loadSprintPlans(ctx, q, driver, boardID, "completed")
+	active, err := loadSprintPlans(ctx, q, driver, teamID, "active")
+	if err != nil {
+		return PlanningDashboard{}, err
+	}
+	completed, err := loadSprintPlans(ctx, q, driver, teamID, "completed")
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
@@ -356,8 +417,15 @@ func loadPlanningDashboard(ctx context.Context, q sqlQueryer, driver Driver, _ s
 	if len(active) > 0 {
 		activeSprint = &active[0]
 	}
+	boardID := ""
+	if len(boards) > 0 {
+		boardID = boards[0].ID
+	}
 	return PlanningDashboard{
+		TeamID:           teamID,
+		TeamName:         teamName,
 		BoardID:          boardID,
+		Boards:           boards,
 		Backlog:          backlog,
 		ActiveSprint:     activeSprint,
 		PlannedSprints:   planned,
@@ -365,13 +433,16 @@ func loadPlanningDashboard(ctx context.Context, q sqlQueryer, driver Driver, _ s
 	}, nil
 }
 
-func loadBacklogCards(ctx context.Context, q sqlQueryer, driver Driver, boardID string) ([]BoardCard, error) {
+func loadBacklogCards(ctx context.Context, q sqlQueryer, driver Driver, teamID string) ([]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT cards.id, cards.column_id, cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s
+		SELECT cards.id, cards.column_id, %s, COALESCE(boards.name, ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
-		WHERE cards.board_id = %s AND cards.sprint_id IS NULL
-		ORDER BY cards.created_at, cards.position, cards.id
-	`, cardDueText(driver), placeholder(driver, 1)), boardID)
+		JOIN boards ON boards.id = cards.board_id
+		LEFT JOIN users ON users.id = cards.assignee_id
+		WHERE boards.team_id = %s AND cards.sprint_id IS NULL
+		ORDER BY boards.name, cards.created_at, cards.position, cards.id
+	`, idText(driver, "cards.board_id"), cardDueText(driver), idText(driver, "cards.assignee_id"), placeholder(driver, 1)), teamID)
 	if err != nil {
 		return nil, err
 	}
@@ -388,21 +459,24 @@ func loadBacklogCards(ctx context.Context, q sqlQueryer, driver Driver, boardID 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := attachLabelsToCards(ctx, q, driver, cards); err != nil {
+		return nil, err
+	}
 	return cards, nil
 }
 
-func loadSprintPlans(ctx context.Context, q sqlQueryer, driver Driver, boardID string, status string) ([]SprintPlan, error) {
+func loadSprintPlans(ctx context.Context, q sqlQueryer, driver Driver, teamID string, status string) ([]SprintPlan, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, workspace_id, board_id, name, goal, status, starts_on, ends_on, %s, %s
+		SELECT id, workspace_id, team_id, board_id, name, goal, status, starts_on, ends_on, %s, %s
 		FROM sprints
-		WHERE board_id = %s AND status = %s
-		ORDER BY created_at, name, id
+		WHERE team_id = %s AND status = %s
+		ORDER BY COALESCE(starts_on, started_at, completed_at, created_at), name, id
 	`,
 		timeText(driver, "started_at"),
 		timeText(driver, "completed_at"),
 		placeholder(driver, 1),
 		placeholder(driver, 2),
-	), boardID, status)
+	), teamID, status)
 	if err != nil {
 		return nil, err
 	}
@@ -433,11 +507,13 @@ func loadSprintPlans(ctx context.Context, q sqlQueryer, driver Driver, boardID s
 
 func loadSprintCards(ctx context.Context, q sqlQueryer, driver Driver, sprintID string) ([]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, column_id, sprint_id, title, description, owner_initials, priority, position, %s
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
-		WHERE sprint_id = %s
-		ORDER BY position, created_at, id
-	`, cardDueText(driver), placeholder(driver, 1)), sprintID)
+		LEFT JOIN users ON users.id = cards.assignee_id
+		WHERE cards.sprint_id = %s
+		ORDER BY cards.position, cards.created_at, cards.id
+	`, idText(driver, "cards.board_id"), cardDueText(driver), idText(driver, "cards.assignee_id"), placeholder(driver, 1)), sprintID)
 	if err != nil {
 		return nil, err
 	}
@@ -454,12 +530,15 @@ func loadSprintCards(ctx context.Context, q sqlQueryer, driver Driver, sprintID 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := attachLabelsToCards(ctx, q, driver, cards); err != nil {
+		return nil, err
+	}
 	return cards, nil
 }
 
 func loadSprint(ctx context.Context, q sqlQueryer, driver Driver, sprintID string) (Sprint, error) {
 	row := q.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, workspace_id, board_id, name, goal, status, starts_on, ends_on, %s, %s
+		SELECT id, workspace_id, team_id, board_id, name, goal, status, starts_on, ends_on, %s, %s
 		FROM sprints
 		WHERE id = %s
 	`, timeText(driver, "started_at"), timeText(driver, "completed_at"), placeholder(driver, 1)), sprintID)
@@ -471,32 +550,102 @@ func loadSprint(ctx context.Context, q sqlQueryer, driver Driver, sprintID strin
 	return sprint, nil
 }
 
-func countActiveSprints(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (int, error) {
+func countActiveSprints(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (int, error) {
 	var count int
 	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM sprints
-		WHERE board_id = %s AND status = 'active'
-	`, placeholder(driver, 1)), boardID).Scan(&count); err != nil {
+		WHERE team_id = %s AND status = 'active'
+	`, placeholder(driver, 1)), teamID).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
 }
 
 func loadBoardWorkspace(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (string, error) {
+	workspaceID, _, err := loadBoardScope(ctx, q, driver, boardID)
+	return workspaceID, err
+}
+
+func loadBoardScope(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (string, string, error) {
 	var workspaceID string
+	var teamID string
 	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT workspace_id
+		SELECT workspace_id, team_id
 		FROM boards
 		WHERE id = %s
-	`, placeholder(driver, 1)), boardID).Scan(&workspaceID); err != nil {
-		return "", notFoundOrErr(err)
+	`, placeholder(driver, 1)), boardID).Scan(&workspaceID, &teamID); err != nil {
+		return "", "", notFoundOrErr(err)
 	}
-	return workspaceID, nil
+	return workspaceID, teamID, nil
+}
+
+func defaultBoardIDForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, error) {
+	boardID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
+		SELECT id
+		FROM boards
+		WHERE team_id = %s
+		ORDER BY created_at, id
+		LIMIT 1
+	`, placeholder(driver, 1)), teamID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("%w: team needs a board before a sprint can be created", ErrValidation)
+	}
+	return boardID, nil
+}
+
+func listBoardSummariesForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) ([]BoardSummary, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s,
+			%s,
+			%s,
+			boards.name,
+			boards.slug,
+			COUNT(DISTINCT columns.id) AS column_count,
+			COUNT(DISTINCT cards.id) AS card_count
+		FROM boards
+		LEFT JOIN columns ON columns.board_id = boards.id
+		LEFT JOIN cards ON cards.board_id = boards.id
+		WHERE boards.team_id = %s
+		GROUP BY boards.id, boards.workspace_id, boards.team_id, boards.name, boards.slug, boards.created_at
+		ORDER BY boards.name, boards.created_at, boards.id
+	`,
+		idText(driver, "boards.id"),
+		idText(driver, "boards.workspace_id"),
+		idText(driver, "boards.team_id"),
+		placeholder(driver, 1),
+	), teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	boards := make([]BoardSummary, 0)
+	for rows.Next() {
+		var board BoardSummary
+		if err := rows.Scan(&board.ID, &board.WorkspaceID, &board.TeamID, &board.Name, &board.Slug, &board.ColumnCount, &board.CardCount); err != nil {
+			return nil, err
+		}
+		boards = append(boards, board)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return boards, nil
 }
 
 func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, boardID string) (string, error) {
-	sprintID, found, err := activeSprintIDForBoard(ctx, q, driver, boardID)
+	boardWorkspaceID, teamID, err := loadBoardScope(ctx, q, driver, boardID)
+	if err != nil {
+		return "", err
+	}
+	if boardWorkspaceID != workspaceID {
+		return "", fmt.Errorf("%w: board must belong to workspace", ErrValidation)
+	}
+	sprintID, found, err := activeSprintIDForTeam(ctx, q, driver, teamID)
 	if err != nil || found {
 		return sprintID, err
 	}
@@ -505,21 +654,22 @@ func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver
 	if err != nil {
 		return "", err
 	}
-	name, err := uniqueSprintName(ctx, q, driver, boardID, "Current sprint")
+	name, err := uniqueSprintName(ctx, q, driver, teamID, "Current sprint")
 	if err != nil {
 		return "", err
 	}
 	_, err = q.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO sprints (id, workspace_id, board_id, name, goal, status, started_at)
-		VALUES (%s, %s, %s, %s, %s, 'active', %s)
+		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, status, started_at)
+		VALUES (%s, %s, %s, %s, %s, %s, 'active', %s)
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
 		placeholder(driver, 3),
 		placeholder(driver, 4),
 		placeholder(driver, 5),
+		placeholder(driver, 6),
 		currentTimestamp(driver),
-	), sprintID, workspaceID, boardID, name, "Current work for this board.")
+	), sprintID, workspaceID, teamID, boardID, name, "Current work for this team.")
 	if err != nil {
 		return "", err
 	}
@@ -527,16 +677,24 @@ func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver
 }
 
 func activeSprintIDForBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (string, bool, error) {
+	_, teamID, err := loadBoardScope(ctx, q, driver, boardID)
+	if err != nil {
+		return "", false, err
+	}
+	return activeSprintIDForTeam(ctx, q, driver, teamID)
+}
+
+func activeSprintIDForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, bool, error) {
 	return lookupID(ctx, q, driver, fmt.Sprintf(`
 		SELECT id
 		FROM sprints
-		WHERE board_id = %s AND status = 'active'
+		WHERE team_id = %s AND status = 'active'
 		ORDER BY started_at DESC, created_at DESC, id
 		LIMIT 1
-	`, placeholder(driver, 1)), boardID)
+	`, placeholder(driver, 1)), teamID)
 }
 
-func uniqueSprintName(ctx context.Context, q sqlQueryer, driver Driver, boardID string, base string) (string, error) {
+func uniqueSprintName(ctx context.Context, q sqlQueryer, driver Driver, teamID string, base string) (string, error) {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		base = "Sprint"
@@ -552,8 +710,8 @@ func uniqueSprintName(ctx context.Context, q sqlQueryer, driver Driver, boardID 
 		if err := q.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT id
 			FROM sprints
-			WHERE board_id = %s AND name = %s
-		`, placeholder(driver, 1), placeholder(driver, 2)), boardID, name).Scan(&existingID); err != nil {
+			WHERE team_id = %s AND name = %s
+		`, placeholder(driver, 1), placeholder(driver, 2)), teamID, name).Scan(&existingID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return name, nil
 			}
@@ -592,8 +750,8 @@ func validateSprintRollover(ctx context.Context, q sqlQueryer, driver Driver, sp
 			if err != nil {
 				return nil, err
 			}
-			if nextSprint.WorkspaceID != sprint.WorkspaceID || nextSprint.BoardID != sprint.BoardID {
-				return nil, fmt.Errorf("%w: rollover sprint must belong to the same board", ErrValidation)
+			if nextSprint.WorkspaceID != sprint.WorkspaceID || nextSprint.TeamID != sprint.TeamID {
+				return nil, fmt.Errorf("%w: rollover sprint must belong to the same team", ErrValidation)
 			}
 			if nextSprint.ID == sprint.ID || nextSprint.Status != "planned" {
 				return nil, fmt.Errorf("%w: rollover sprint must be planned", ErrValidation)
@@ -613,6 +771,7 @@ func scanSprint(scanner cardScanner) (Sprint, error) {
 	if err := scanner.Scan(
 		&sprint.ID,
 		&sprint.WorkspaceID,
+		&sprint.TeamID,
 		&sprint.BoardID,
 		&sprint.Name,
 		&sprint.Goal,

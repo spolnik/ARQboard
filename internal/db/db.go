@@ -356,9 +356,6 @@ func CreateAdminUser(ctx context.Context, conn *Connection, params CreateAdminUs
 
 	email := normalizeEmail(params.Email)
 	displayName := strings.TrimSpace(params.DisplayName)
-	if displayName == "" {
-		displayName = email
-	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -426,6 +423,9 @@ func validateAdminUser(params CreateAdminUserParams) error {
 	}
 	if !strings.Contains(params.Email, "@") {
 		return fmt.Errorf("email %q is not valid", params.Email)
+	}
+	if strings.TrimSpace(params.DisplayName) == "" {
+		return errors.New("display name is required")
 	}
 	if len(params.Password) < 12 {
 		return errors.New("password must be at least 12 characters")

@@ -52,6 +52,13 @@ func TestTeamStoreListsCreatesAndUpdatesWorkspaceMembers(t *testing.T) {
 	if created.Email != "developer@example.com" || created.DisplayName != "Developer" || created.Role != "member" {
 		t.Fatalf("created member = %#v, want normalized member", created)
 	}
+	teams, err := store.ListTeams(ctx)
+	if err != nil {
+		t.Fatalf("ListTeams returned error: %v", err)
+	}
+	if len(teams) != 1 || teams[0].Name != "Platform Engineering" || len(teams[0].Members) != 2 {
+		t.Fatalf("teams = %#v, want default team with admin and developer", teams)
+	}
 
 	session, err := (AuthStore{Conn: boardStore.Conn}).Login(ctx, LoginParams{
 		Email:    "developer@example.com",
@@ -74,6 +81,26 @@ func TestTeamStoreListsCreatesAndUpdatesWorkspaceMembers(t *testing.T) {
 	if updated.Role != "viewer" || updated.UserID != created.UserID {
 		t.Fatalf("updated member = %#v, want viewer with same user", updated)
 	}
+
+	createdTeam, err := store.CreateTeam(ctx, CreateTeamParams{Name: "Design Systems"})
+	if err != nil {
+		t.Fatalf("CreateTeam returned error: %v", err)
+	}
+	if createdTeam.Name != "Design Systems" || createdTeam.Slug != "design-systems" {
+		t.Fatalf("created team = %#v, want named design team", createdTeam)
+	}
+
+	withMember, err := store.AddTeamMember(ctx, AddTeamMemberParams{
+		TeamID: createdTeam.ID,
+		UserID: created.UserID,
+		Role:   "admin",
+	})
+	if err != nil {
+		t.Fatalf("AddTeamMember returned error: %v", err)
+	}
+	if !containsTeamMember(withMember.Members, created.UserID, "admin") {
+		t.Fatalf("team members = %#v, want developer admin", withMember.Members)
+	}
 }
 
 func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
@@ -84,17 +111,26 @@ func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
 
 	store := TeamStore{Conn: boardStore.Conn}
 	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
-		Email:    "person@example.com",
-		Password: "correct horse battery member",
-		Role:     "manager",
+		Email:       "person@example.com",
+		DisplayName: "Person",
+		Password:    "correct horse battery member",
+		Role:        "manager",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("invalid create role error = %v, want ErrValidation", err)
 	}
 	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
-		Email: "person@example.com",
-		Role:  "member",
+		Email:       "person@example.com",
+		DisplayName: "Person",
+		Role:        "member",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("missing password error = %v, want ErrValidation", err)
+	}
+	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:    "person@example.com",
+		Password: "correct horse battery member",
+		Role:     "member",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing display name error = %v, want ErrValidation", err)
 	}
 	if _, err := store.UpdateWorkspaceMember(ctx, UpdateWorkspaceMemberParams{
 		MemberID: "missing",
@@ -105,6 +141,50 @@ func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
 	if _, err := (TeamStore{}).ListWorkspaceMembers(ctx); !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("ListWorkspaceMembers without database error = %v, want ErrDatabaseUnavailable", err)
 	}
+	if _, err := store.CreateTeam(ctx, CreateTeamParams{}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("CreateTeam without name error = %v, want ErrValidation", err)
+	}
+	if _, err := store.AddTeamMember(ctx, AddTeamMemberParams{}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("AddTeamMember without ids error = %v, want ErrValidation", err)
+	}
+	if _, err := store.AddTeamMember(ctx, AddTeamMemberParams{
+		TeamID: "missing",
+		UserID: "missing",
+		Role:   "member",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AddTeamMember missing team error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestWorkspaceRoleHelpers(t *testing.T) {
+	tests := map[string]string{
+		" owner ": "owner",
+		"ADMIN":   "admin",
+		"":        "member",
+		"member":  "member",
+		"viewer":  "viewer",
+	}
+	for input, want := range tests {
+		got, err := normalizeWorkspaceRole(input)
+		if err != nil {
+			t.Fatalf("normalizeWorkspaceRole(%q) returned error: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeWorkspaceRole(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := normalizeWorkspaceRole("manager"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("normalizeWorkspaceRole invalid error = %v, want ErrValidation", err)
+	}
+}
+
+func containsTeamMember(members []TeamMember, userID string, role string) bool {
+	for _, member := range members {
+		if member.UserID == userID && member.Role == role {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSQLiteMigrationRepairsWorkspaceMembersWithoutID(t *testing.T) {

@@ -25,8 +25,11 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBoard returned error: %v", err)
 	}
+	if otherBoard.TeamID != board.TeamID {
+		t.Fatalf("otherBoard.TeamID = %q, want same default team %q", otherBoard.TeamID, board.TeamID)
+	}
 
-	initial, err := store.GetPlanningDashboard(ctx, board.ID)
+	initial, err := store.GetPlanningDashboard(ctx, board.TeamID)
 	if err != nil {
 		t.Fatalf("GetPlanningDashboard returned error: %v", err)
 	}
@@ -35,8 +38,26 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	}
 	activeCard := initial.ActiveSprint.Cards[0]
 
+	otherCard, err := store.CreateCard(ctx, CreateCardParams{
+		ColumnID: otherBoard.Columns[0].ID,
+		Title:    "Coordinate release train backlog",
+	})
+	if err != nil {
+		t.Fatalf("CreateCard other board returned error: %v", err)
+	}
+	withTwoBoards, err := store.GetPlanningDashboard(ctx, board.TeamID)
+	if err != nil {
+		t.Fatalf("GetPlanningDashboard with two boards returned error: %v", err)
+	}
+	if withTwoBoards.ActiveSprint == nil || !containsCard(withTwoBoards.ActiveSprint.Cards, otherCard.ID) {
+		t.Fatalf("team active sprint cards = %#v, want card from second board", withTwoBoards.ActiveSprint)
+	}
+	if len(withTwoBoards.Boards) != 2 {
+		t.Fatalf("team planning boards = %d, want both team boards", len(withTwoBoards.Boards))
+	}
+
 	sprint, err := store.CreateSprint(ctx, CreateSprintParams{
-		BoardID:  board.ID,
+		TeamID:   board.TeamID,
 		Name:     "Sprint 2026-05 Platform",
 		Goal:     "Ship planning foundations",
 		StartsOn: "2026-05-04",
@@ -45,19 +66,29 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	if sprint.Status != "planned" || sprint.Name != "Sprint 2026-05 Platform" || sprint.BoardID != board.ID {
+	if sprint.Status != "planned" || sprint.Name != "Sprint 2026-05 Platform" || sprint.TeamID != board.TeamID {
 		t.Fatalf("created sprint = %#v, want planned named sprint", sprint)
 	}
 
+	teamStore := TeamStore{Conn: store.Conn}
+	otherTeam, err := teamStore.CreateTeam(ctx, CreateTeamParams{Name: "Mobile Team"})
+	if err != nil {
+		t.Fatalf("CreateTeam returned error: %v", err)
+	}
+	otherTeamBoard, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Mobile Board", TeamID: otherTeam.ID})
+	if err != nil {
+		t.Fatalf("CreateBoard other team returned error: %v", err)
+	}
 	otherSprint, err := store.CreateSprint(ctx, CreateSprintParams{
-		BoardID: otherBoard.ID,
+		TeamID:  otherTeam.ID,
+		BoardID: otherTeamBoard.ID,
 		Name:    "Sprint 2026-05 Platform",
 	})
 	if err != nil {
-		t.Fatalf("CreateSprint for other board returned error: %v", err)
+		t.Fatalf("CreateSprint for other team returned error: %v", err)
 	}
 	if _, err := store.StartSprint(ctx, otherSprint.ID); err != nil {
-		t.Fatalf("StartSprint for other board returned error: %v", err)
+		t.Fatalf("StartSprint for other team returned error: %v", err)
 	}
 
 	completed, err := store.CompleteSprint(ctx, CompleteSprintParams{
@@ -73,7 +104,7 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 		t.Fatalf("completed sprint = %#v, want completed with completed time", completed)
 	}
 
-	afterComplete, err := store.GetPlanningDashboard(ctx, board.ID)
+	afterComplete, err := store.GetPlanningDashboard(ctx, board.TeamID)
 	if err != nil {
 		t.Fatalf("GetPlanningDashboard after complete returned error: %v", err)
 	}
@@ -95,7 +126,7 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 		t.Fatalf("assigned card sprint = %q, want %q", assigned.SprintID, sprint.ID)
 	}
 
-	afterAssign, err := store.GetPlanningDashboard(ctx, board.ID)
+	afterAssign, err := store.GetPlanningDashboard(ctx, board.TeamID)
 	if err != nil {
 		t.Fatalf("GetPlanningDashboard after assign returned error: %v", err)
 	}
@@ -114,7 +145,7 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 		t.Fatalf("active sprint = %#v, want active with started time", active)
 	}
 
-	afterStart, err := store.GetPlanningDashboard(ctx, board.ID)
+	afterStart, err := store.GetPlanningDashboard(ctx, board.TeamID)
 	if err != nil {
 		t.Fatalf("GetPlanningDashboard after start returned error: %v", err)
 	}
@@ -122,12 +153,12 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 		t.Fatalf("active dashboard sprint = %#v, want sprint %s", afterStart.ActiveSprint, sprint.ID)
 	}
 
-	otherDashboard, err := store.GetPlanningDashboard(ctx, otherBoard.ID)
+	otherDashboard, err := store.GetPlanningDashboard(ctx, otherTeam.ID)
 	if err != nil {
-		t.Fatalf("GetPlanningDashboard other board returned error: %v", err)
+		t.Fatalf("GetPlanningDashboard other team returned error: %v", err)
 	}
 	if otherDashboard.ActiveSprint == nil || otherDashboard.ActiveSprint.Sprint.ID != otherSprint.ID {
-		t.Fatalf("other board active sprint = %#v, want %s", otherDashboard.ActiveSprint, otherSprint.ID)
+		t.Fatalf("other team active sprint = %#v, want %s", otherDashboard.ActiveSprint, otherSprint.ID)
 	}
 }
 

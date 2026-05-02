@@ -1,6 +1,28 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
-import App, { resolveDragMoveTarget, resolveMoveTarget, sprintWindow } from './App';
+import App, {
+  cardAssigneeText,
+  cardMatchesFilters,
+  cardMatchesSearch,
+  columnAccent,
+  defaultAssigneeId,
+  dueStatus,
+  addSprintToDashboard,
+  assignCardInDashboard,
+  completeSprintInDashboard,
+  hasActiveBoardFilters,
+  normalizeCard,
+  normalizePlanningDashboard,
+  resolveDragMoveTarget,
+  resolveMoveTarget,
+  resolvePlanningMoveTarget,
+  sortCards,
+  sortSprintPlans,
+  sprintSortKey,
+  sprintStatusDisplay,
+  startSprintInDashboard,
+  sprintWindow,
+} from './App';
 
 const userFixture = {
   id: 'user-1',
@@ -11,8 +33,18 @@ const userFixture = {
 
 const boardFixture = {
   id: 'board-1',
+  workspaceId: 'workspace-1',
+  teamId: 'team-platform',
   name: 'Platform Board',
   slug: 'platform',
+  members: [
+    { id: 'member-1', workspaceId: 'workspace-1', userId: 'user-1', email: 'admin@example.com', displayName: 'Admin', role: 'owner', isAdmin: true },
+    { id: 'member-2', workspaceId: 'workspace-1', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'member', isAdmin: false },
+  ],
+  labels: [
+    { id: 'label-backend', workspaceId: 'workspace-1', name: 'Backend', color: '#0f766e' },
+    { id: 'label-risk', workspaceId: 'workspace-1', name: 'Risk', color: '#be123c' },
+  ],
   columns: [
     {
       id: 'column-planned',
@@ -22,8 +54,14 @@ const boardFixture = {
         {
           id: 'card-1',
           columnId: 'column-planned',
+          boardId: 'board-1',
+          boardName: 'Platform Board',
           title: 'Wire auth session cookie flow',
-          owner: 'MS',
+          owner: 'Admin',
+          assigneeId: 'user-1',
+          assigneeName: 'Admin',
+          assigneeEmail: 'admin@example.com',
+          labels: [{ id: 'label-backend', workspaceId: 'workspace-1', name: 'Backend', color: '#0f766e' }],
           priority: 'High',
           due: '2026-04-30',
           description: 'Map the session cookie lifecycle.',
@@ -39,8 +77,14 @@ const boardFixture = {
         {
           id: 'card-2',
           columnId: 'column-progress',
+          boardId: 'board-1',
+          boardName: 'Platform Board',
           title: 'Ready for review API shape',
-          owner: 'AK',
+          owner: 'Dev',
+          assigneeId: 'user-2',
+          assigneeName: 'Dev',
+          assigneeEmail: 'dev@example.com',
+          labels: [{ id: 'label-risk', workspaceId: 'workspace-1', name: 'Risk', color: '#be123c' }],
           priority: 'Urgent',
           due: '2026-05-01',
           description: 'Lock the first JSON contracts.',
@@ -56,8 +100,14 @@ const boardFixture = {
         {
           id: 'card-3',
           columnId: 'column-review',
+          boardId: 'board-1',
+          boardName: 'Platform Board',
           title: 'Deployment checklist',
-          owner: 'JL',
+          owner: '',
+          assigneeId: '',
+          assigneeName: '',
+          assigneeEmail: '',
+          labels: [],
           priority: 'Normal',
           due: '2026-05-03',
           description: 'Document deployment checks.',
@@ -88,6 +138,7 @@ const boardSummaries = [
   {
     id: 'board-1',
     workspaceId: 'workspace-1',
+    teamId: 'team-platform',
     name: 'Platform Board',
     slug: 'platform',
     columnCount: 4,
@@ -96,6 +147,7 @@ const boardSummaries = [
   {
     id: 'board-release',
     workspaceId: 'workspace-1',
+    teamId: 'team-platform',
     name: 'Release Train',
     slug: 'release-train',
     columnCount: 4,
@@ -105,6 +157,8 @@ const boardSummaries = [
 
 const releaseBoardFixture = {
   id: 'board-release',
+  workspaceId: 'workspace-1',
+  teamId: 'team-platform',
   name: 'Release Train',
   slug: 'release-train',
   columns: [
@@ -118,6 +172,8 @@ const releaseBoardFixture = {
 
 const createdBoardFixture = {
   id: 'board-security',
+  workspaceId: 'workspace-1',
+  teamId: 'team-platform',
   name: 'Security Backlog',
   slug: 'security-backlog',
   columns: [
@@ -142,8 +198,14 @@ const boardWithRenamedColumn = {
 const createdCard = {
   id: 'card-new',
   columnId: 'column-planned',
+  boardId: 'board-1',
+  boardName: 'Platform Board',
   title: 'Run local smoke test',
-  owner: 'QA',
+  owner: 'Admin',
+  assigneeId: 'user-1',
+  assigneeName: 'Admin',
+  assigneeEmail: 'admin@example.com',
+  labels: [],
   priority: 'Normal',
   due: '2026-05-08',
   description: 'New card created locally.',
@@ -170,7 +232,7 @@ const updatedCard = {
   ...boardFixture.columns[0].cards[0],
   title: 'Wire production auth flow',
   description: 'Document cookie boundaries and refresh behavior.',
-  owner: 'QA',
+  owner: 'Admin',
   priority: 'Urgent',
   due: '2026-05-09',
 };
@@ -209,6 +271,27 @@ const workspaceMembers = [
   { id: 'member-2', workspaceId: 'workspace-1', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'member', isAdmin: false },
 ];
 
+const teamsFixture = [
+  {
+    id: 'team-platform',
+    workspaceId: 'workspace-1',
+    name: 'Platform Engineering',
+    slug: 'platform-engineering',
+    members: [
+      { id: 'team-member-1', teamId: 'team-platform', userId: 'user-1', email: 'admin@example.com', displayName: 'Admin', role: 'owner', isAdmin: true },
+      { id: 'team-member-2', teamId: 'team-platform', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'member', isAdmin: false },
+    ],
+  },
+];
+
+const createdTeamFixture = {
+  id: 'team-design',
+  workspaceId: 'workspace-1',
+  name: 'Design Systems',
+  slug: 'design-systems',
+  members: [],
+};
+
 const createdWorkspaceMember = {
   id: 'member-3',
   workspaceId: 'workspace-1',
@@ -227,6 +310,7 @@ const updatedWorkspaceMember = {
 const sprintFixture = {
   id: 'sprint-1',
   workspaceId: 'workspace-1',
+  teamId: 'team-platform',
   boardId: 'board-1',
   name: 'Sprint 2026-05 Platform',
   goal: 'Ship planning foundations',
@@ -249,6 +333,9 @@ const completedSprintFixture = {
 
 const planningDashboardFixture = {
   boardId: 'board-1',
+  teamId: 'team-platform',
+  teamName: 'Platform Engineering',
+  boards: boardSummaries,
   backlog: [boardFixture.columns[0].cards[0]],
   plannedSprints: [],
   completedSprints: [],
@@ -264,6 +351,15 @@ function jsonResponse(body: unknown, status = 200) {
 async function clickPrimaryNavButton(name: RegExp) {
   const nav = await screen.findByRole('navigation', { name: /primary navigation/i });
   fireEvent.click(within(nav).getByRole('button', { name }));
+}
+
+function dateOffset(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 describe('App', () => {
@@ -287,6 +383,18 @@ describe('App', () => {
         }
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams' && init?.method === 'POST') {
+          return jsonResponse(createdTeamFixture, 201);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
+        if (url === '/api/teams/team-platform/members' && init?.method === 'POST') {
+          return jsonResponse({
+            ...teamsFixture[0],
+            members: [...teamsFixture[0].members, { id: 'team-member-qa', teamId: 'team-platform', userId: 'user-3', email: 'qa@example.com', displayName: 'QA', role: 'viewer', isAdmin: false }],
+          });
         }
         if (url === '/api/boards/board-1') {
           return jsonResponse(boardFixture);
@@ -345,7 +453,7 @@ describe('App', () => {
         if (url === '/api/members/member-2' && init?.method === 'PATCH') {
           return jsonResponse(updatedWorkspaceMember);
         }
-        if (url === '/api/planning?boardId=board-1') {
+        if (url === '/api/planning?teamId=team-platform') {
           return jsonResponse(planningResponse);
         }
         if (url === '/api/sprints' && init?.method === 'POST') {
@@ -360,6 +468,9 @@ describe('App', () => {
         if (url === '/api/sprints/sprint-1/complete' && init?.method === 'POST') {
           planningResponse = {
             boardId: 'board-1',
+            teamId: 'team-platform',
+            teamName: 'Platform Engineering',
+            boards: boardSummaries,
             backlog: [{ ...boardFixture.columns[0].cards[0], sprintId: '' }],
             activeSprint: null,
             plannedSprints: [],
@@ -389,6 +500,9 @@ describe('App', () => {
       if (url === '/api/boards') {
         return jsonResponse(boardSummaries);
       }
+      if (url === '/api/teams') {
+        return jsonResponse(teamsFixture);
+      }
       if (url === '/api/boards/board-1') {
         return jsonResponse(boardFixture);
       }
@@ -412,6 +526,8 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
     const taskCard = screen.getByRole('button', { name: /view card wire auth session cookie flow/i });
     expect(taskCard).toHaveClass('cursor-grab');
+    expect(within(taskCard).getByText('Admin')).toBeInTheDocument();
+    expect(within(taskCard).queryByText('MS')).not.toBeInTheDocument();
     expect(screen.getByLabelText(/priority high/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/due 2026-04-30 overdue/i)).toHaveClass('border-rose-200');
     expect(screen.queryByRole('button', { name: /drag wire auth session cookie flow/i })).not.toBeInTheDocument();
@@ -421,6 +537,27 @@ describe('App', () => {
     expect(screen.getAllByText('Deployment checklist').length).toBeGreaterThan(0);
     expect(fetch).toHaveBeenCalledWith('/api/boards');
     expect(fetch).toHaveBeenCalledWith('/api/boards/board-1');
+  });
+
+  it('filters the board by assignee, label, priority, and due status', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/filter by assignee/i), { target: { value: 'user-2' } });
+    expect(screen.getByText('Ready for review API shape')).toBeInTheDocument();
+    expect(screen.queryByText('Wire auth session cookie flow')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/filter by label/i), { target: { value: 'label-risk' } });
+    expect(screen.getByText('Ready for review API shape')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/filter by priority/i), { target: { value: 'high' } });
+    expect(screen.queryByText('Ready for review API shape')).not.toBeInTheDocument();
+    expect(screen.getAllByText('No matches').length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText(/filter by priority/i), { target: { value: 'all' } });
+    fireEvent.change(screen.getByLabelText(/filter by due status/i), { target: { value: 'overdue' } });
+    expect(screen.getByText('Ready for review API shape')).toBeInTheDocument();
   });
 
   it('marks cards with missing due dates without breaking the board', async () => {
@@ -441,6 +578,9 @@ describe('App', () => {
         }
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
         }
         if (url === '/api/boards/board-1') {
           return jsonResponse(boardWithMissingDue);
@@ -468,6 +608,9 @@ describe('App', () => {
         }
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
         }
         return jsonResponse({ error: { code: 'not_ready' } }, 500);
       }),
@@ -497,6 +640,9 @@ describe('App', () => {
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
         }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
         if (url === '/api/boards/board-1') {
           return jsonResponse(lowPriorityBoard);
         }
@@ -523,6 +669,9 @@ describe('App', () => {
       }
       if (url === '/api/boards') {
         return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/teams') {
+        return jsonResponse(teamsFixture);
       }
       if (url === '/api/boards/board-1') {
         return jsonResponse(boardFixture);
@@ -659,6 +808,9 @@ describe('App', () => {
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
         }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
         if (url === '/api/boards/board-1') {
           return jsonResponse(fallbackBoard);
         }
@@ -693,6 +845,9 @@ describe('App', () => {
         }
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
         }
         if (url === '/api/boards/board-1') {
           return jsonResponse(emptyBoard);
@@ -740,12 +895,49 @@ describe('App', () => {
         '/api/boards',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ name: 'Security Backlog' }),
+          body: JSON.stringify({ name: 'Security Backlog', teamId: 'team-platform' }),
         }),
       ),
     );
     expect(await screen.findByRole('heading', { name: /security backlog/i })).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: /create board/i })).not.toBeInTheDocument();
+  });
+
+  it('creates teams and assigns workspace members to a team', async () => {
+    render(<App />);
+
+    await clickPrimaryNavButton(/settings/i);
+    fireEvent.change(await screen.findByLabelText(/team name/i), {
+      target: { value: 'Design Systems' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create team/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/teams',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ name: 'Design Systems' }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/team created/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^platform engineering/i }));
+    fireEvent.change(screen.getByLabelText(/team member/i), { target: { value: 'user-2' } });
+    fireEvent.change(screen.getByLabelText(/team role/i), { target: { value: 'admin' } });
+    fireEvent.click(screen.getByRole('button', { name: /assign/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/teams/team-platform/members',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ userId: 'user-2', role: 'admin' }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/member assigned to team/i)).toBeInTheDocument();
   });
 
   it('adds and renames board columns', async () => {
@@ -802,6 +994,9 @@ describe('App', () => {
         if (url === '/api/boards') {
           return jsonResponse([]);
         }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
         throw new Error(`Unexpected fetch ${url}`);
       }),
     );
@@ -848,6 +1043,9 @@ describe('App', () => {
       }
       if (url === '/api/boards') {
         return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/teams') {
+        return jsonResponse(teamsFixture);
       }
       if (url === '/api/boards/board-1') {
         return jsonResponse(boardFixture);
@@ -903,6 +1101,9 @@ describe('App', () => {
         }
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
         }
         if (url === '/api/boards/board-1') {
           return jsonResponse(boardFixture);
@@ -966,6 +1167,9 @@ describe('App', () => {
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
         }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
         if (url === '/api/boards/board-1') {
           return jsonResponse(boardFixture);
         }
@@ -1006,7 +1210,8 @@ describe('App', () => {
 
     const detail = screen.getByRole('complementary', { name: /card detail/i });
     expect(within(detail).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
-    expect(within(detail).getByText(/Owner MS/)).toBeInTheDocument();
+    expect(within(detail).getByText(/Assignee Admin/)).toBeInTheDocument();
+    expect(within(detail).getByText('Backend')).toBeInTheDocument();
     expect(within(detail).getByText(/Priority High/)).toBeInTheDocument();
   });
 
@@ -1025,9 +1230,7 @@ describe('App', () => {
     fireEvent.change(within(detail).getByLabelText(/priority/i), {
       target: { value: 'urgent' },
     });
-    fireEvent.change(within(detail).getByLabelText(/owner initials/i), {
-      target: { value: 'QA' },
-    });
+    expect(within(detail).queryByLabelText(/owner initials/i)).not.toBeInTheDocument();
     fireEvent.change(within(detail).getByLabelText(/due date/i), {
       target: { value: '2026-05-09' },
     });
@@ -1042,7 +1245,8 @@ describe('App', () => {
             title: 'Wire production auth flow',
             description: 'Document cookie boundaries and refresh behavior.',
             priority: 'urgent',
-            ownerInitials: 'QA',
+            assigneeId: 'user-1',
+            labelNames: ['Backend'],
             due: '2026-05-09',
           }),
         }),
@@ -1081,9 +1285,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText(/card title/i), {
       target: { value: 'Run local smoke test' },
     });
-    fireEvent.change(screen.getByLabelText(/owner initials/i), {
-      target: { value: 'QA' },
-    });
+    expect(screen.queryByLabelText(/owner initials/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /create card/i }));
 
     await waitFor(() =>
@@ -1094,7 +1296,8 @@ describe('App', () => {
           body: JSON.stringify({
             columnId: 'column-planned',
             title: 'Run local smoke test',
-            ownerInitials: 'QA',
+            assigneeId: 'user-1',
+            labelNames: [],
           }),
         }),
       ),
@@ -1103,7 +1306,7 @@ describe('App', () => {
     const board = screen.getByRole('region', { name: /kanban board/i });
     expect(within(board).getByText('Run local smoke test')).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: /create card/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/Owner QA/)).toBeInTheDocument();
+    expect(screen.getByText(/Assignee Admin/)).toBeInTheDocument();
   });
 
   it('removes legacy arrow movement controls from cards', async () => {
@@ -1147,10 +1350,23 @@ describe('App', () => {
     expect(resolveDragMoveTarget(board, 'card-1', 'card-1', ['card-1', 'missing-target'])).toBeNull();
   });
 
+  it('resolves planning drag targets for sprint lanes and backlog', () => {
+    expect(resolvePlanningMoveTarget('planning-card:card-1', 'planning-sprint:sprint-1')).toEqual({
+      cardId: 'card-1',
+      sprintId: 'sprint-1',
+    });
+    expect(resolvePlanningMoveTarget('planning-card:card-1', 'planning-backlog')).toEqual({
+      cardId: 'card-1',
+      sprintId: '',
+    });
+    expect(resolvePlanningMoveTarget('card-1', 'planning-sprint:sprint-1')).toBeNull();
+  });
+
   it('formats sprint windows for complete and partial date ranges', () => {
     const baseSprint = {
       id: 'sprint-window',
       workspaceId: 'workspace-1',
+      teamId: 'team-platform',
       boardId: 'board-1',
       name: 'Sprint window',
       goal: '',
@@ -1163,6 +1379,137 @@ describe('App', () => {
     expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01' })).toBe('Starts 2026-05-01');
     expect(sprintWindow({ ...baseSprint, endsOn: '2026-05-15' })).toBe('Ends 2026-05-15');
     expect(sprintWindow(baseSprint)).toBe('Dates not set');
+  });
+
+  it('normalizes and updates planning dashboard state', () => {
+    type CardArg = Parameters<typeof normalizeCard>[0];
+    type DashboardArg = Parameters<typeof normalizePlanningDashboard>[0];
+    type SprintArg = Parameters<typeof sprintWindow>[0];
+    const planningCard = boardFixture.columns[0].cards[0] as CardArg;
+    const plannedSprint = sprintFixture as SprintArg;
+    const activeSprint = activeSprintFixture as SprintArg;
+    const completedSprintBase = completedSprintFixture as SprintArg;
+    const rawCard = {
+      id: 'raw-card',
+      columnId: 'column-planned',
+      title: 'Raw card',
+      priority: 'Normal',
+      due: '',
+      description: '',
+      position: 3,
+    } as CardArg;
+    expect(normalizeCard(rawCard)).toMatchObject({ boardId: '', boardName: '', sprintId: '', labels: [] });
+
+    const emptyDashboard = normalizePlanningDashboard({} as DashboardArg);
+    expect(emptyDashboard).toMatchObject({ boardId: '', teamId: '', teamName: '', boards: [], backlog: [], plannedSprints: [], completedSprints: [] });
+
+    const dashboard = normalizePlanningDashboard({
+      ...planningDashboardFixture,
+      backlog: [{ ...planningCard, sprintId: '' }],
+      plannedSprints: [{ sprint: plannedSprint, cards: [] }],
+      completedSprints: [],
+    } as DashboardArg);
+    const added = addSprintToDashboard(dashboard, { ...plannedSprint, id: 'sprint-2', name: 'Sprint 2026-06 Platform', startsOn: '2026-06-01' });
+    expect(added.plannedSprints.map((plan) => plan.sprint.id)).toContain('sprint-2');
+    expect(addSprintToDashboard(added, { ...plannedSprint, goal: 'Updated goal' }).plannedSprints.find((plan) => plan.sprint.id === 'sprint-1')?.sprint.goal).toBe('Updated goal');
+
+    const assignedToPlanned = assignCardInDashboard(dashboard, { ...planningCard, sprintId: 'sprint-1' });
+    expect(assignedToPlanned.backlog).toHaveLength(0);
+    expect(assignedToPlanned.plannedSprints[0].cards[0].id).toBe('card-1');
+
+    const returnedToBacklog = assignCardInDashboard(assignedToPlanned, { ...planningCard, sprintId: '' });
+    expect(returnedToBacklog.backlog[0].id).toBe('card-1');
+
+    const activeDashboard = {
+      ...dashboard,
+      activeSprint: { sprint: activeSprint, cards: [] },
+      plannedSprints: [],
+    } as DashboardArg;
+    expect(assignCardInDashboard(activeDashboard, { ...planningCard, sprintId: activeSprint.id }).activeSprint?.cards[0].id).toBe('card-1');
+
+    const completedSprint = { ...completedSprintBase, id: 'sprint-done', name: 'Done sprint' };
+    const completedDashboard = { ...dashboard, plannedSprints: [], completedSprints: [{ sprint: completedSprint, cards: [] }] } as DashboardArg;
+    expect(assignCardInDashboard(completedDashboard, { ...planningCard, sprintId: completedSprint.id }).completedSprints[0].cards[0].id).toBe('card-1');
+
+    const started = startSprintInDashboard(dashboard, activeSprint);
+    expect(started.activeSprint?.sprint.status).toBe('active');
+    expect(started.plannedSprints).toHaveLength(0);
+    const finished = completeSprintInDashboard(started, completedSprintBase);
+    expect(finished.activeSprint).toBeNull();
+    expect(finished.completedSprints[0].sprint.status).toBe('completed');
+  });
+
+  it('sorts cards and sprints for planning timelines', () => {
+    type SprintArg = Parameters<typeof sprintWindow>[0];
+    const card = boardFixture.columns[0].cards[0] as Parameters<typeof normalizeCard>[0];
+    const plannedSprint = sprintFixture as SprintArg;
+    const first = { ...card, id: 'card-a', title: 'A card', position: 0 };
+    const second = { ...card, id: 'card-b', title: 'B card', position: 1 };
+    expect(sortCards([second, first]).map((card) => card.id)).toEqual(['card-a', 'card-b']);
+
+    const startedSprint = { ...plannedSprint, id: 'sprint-started', startsOn: '', startedAt: '2026-05-03T08:00:00Z' };
+    const completedSprint = { ...plannedSprint, id: 'sprint-completed', startsOn: '', completedAt: '2026-05-02T08:00:00Z' };
+    expect(sortSprintPlans([{ sprint: startedSprint, cards: [] }, { sprint: completedSprint, cards: [] }]).map((plan) => plan.sprint.id)).toEqual([
+      'sprint-completed',
+      'sprint-started',
+    ]);
+    expect(sprintSortKey({ ...plannedSprint, startsOn: '2026-05-04' })).toBe('2026-05-04');
+    expect(sprintSortKey(startedSprint)).toBe('2026-05-03T08:00:00Z');
+    expect(sprintSortKey(completedSprint)).toBe('2026-05-02T08:00:00Z');
+    expect(sprintSortKey({ ...plannedSprint, startsOn: '', name: 'Named sprint' })).toBe('Named sprint');
+  });
+
+  it('labels sprint statuses for timeline lanes', () => {
+    expect(sprintStatusDisplay('planned').label).toBe('Planned');
+    expect(sprintStatusDisplay('active').label).toBe('Active');
+    expect(sprintStatusDisplay('completed').label).toBe('Completed');
+  });
+
+  it('classifies due dates and card display helpers', () => {
+    expect(dueStatus('').label).toBe('date missing');
+    expect(dueStatus(dateOffset(-1)).label).toBe('overdue');
+    expect(dueStatus(dateOffset(1)).label).toBe('due soon');
+    expect(dueStatus(dateOffset(5)).label).toBe('scheduled');
+    expect(columnAccent(0)).toBe('bg-sky-500');
+    expect(columnAccent(1)).toBe('bg-amber-500');
+    expect(columnAccent(9)).toBe('bg-emerald-500');
+
+    const card = boardFixture.columns[0].cards[0] as Parameters<typeof cardAssigneeText>[0];
+    expect(cardAssigneeText(card)).toBe('Admin');
+    expect(cardAssigneeText({ ...card, assigneeName: '', assigneeEmail: 'admin@example.com' })).toBe('admin@example.com');
+    expect(cardAssigneeText({ ...card, assigneeName: '', assigneeEmail: '' })).toBe('Unassigned');
+  });
+
+  it('matches card search and filter combinations', () => {
+    const card = boardFixture.columns[0].cards[0] as Parameters<typeof cardMatchesFilters>[0];
+    const emptyFilters: Parameters<typeof cardMatchesFilters>[1] = { assigneeId: 'all', labelId: 'all', priority: 'all', dueStatus: 'all' };
+
+    expect(cardMatchesSearch(card, '')).toBe(true);
+    expect(cardMatchesSearch(card, 'backend')).toBe(true);
+    expect(cardMatchesSearch(card, 'not-on-card')).toBe(false);
+    expect(hasActiveBoardFilters(emptyFilters)).toBe(false);
+    expect(hasActiveBoardFilters({ ...emptyFilters, assigneeId: 'user-1' })).toBe(true);
+
+    expect(cardMatchesFilters(card, emptyFilters)).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, assigneeId: 'unassigned' })).toBe(false);
+    expect(cardMatchesFilters({ ...card, assigneeId: '' }, { ...emptyFilters, assigneeId: 'unassigned' })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, assigneeId: 'user-2' })).toBe(false);
+    expect(cardMatchesFilters(card, { ...emptyFilters, assigneeId: 'user-1' })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, labelId: 'none' })).toBe(false);
+    expect(cardMatchesFilters({ ...card, labels: [] }, { ...emptyFilters, labelId: 'none' })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, labelId: 'label-risk' })).toBe(false);
+    expect(cardMatchesFilters(card, { ...emptyFilters, labelId: 'label-backend' })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, priority: 'urgent' })).toBe(false);
+    expect(cardMatchesFilters(card, { ...emptyFilters, priority: 'high' })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, dueStatus: dueStatus(card.due).label })).toBe(true);
+    expect(cardMatchesFilters(card, { ...emptyFilters, dueStatus: 'scheduled' })).toBe(false);
+  });
+
+  it('chooses default assignees from board membership', () => {
+    expect(defaultAssigneeId(null, userFixture)).toBe('');
+    expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], null)).toBe('');
+    expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], userFixture)).toBe('user-1');
+    expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], { ...userFixture, id: 'missing-user' })).toBe('');
   });
 
   it('filters cards and wiki pages with workspace search', async () => {
@@ -1227,6 +1574,7 @@ describe('App', () => {
         expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({
+            teamId: 'team-platform',
             boardId: 'board-1',
             name: 'Sprint 2026-05 Platform',
             goal: 'Ship planning foundations',
@@ -1237,26 +1585,11 @@ describe('App', () => {
       ),
     );
 
-    fireEvent.change(screen.getByLabelText(/sprint for wire auth session cookie flow/i), {
-      target: { value: 'sprint-1' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /assign wire auth session cookie flow/i }));
-
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        '/api/cards/card-1/sprint',
-        expect.objectContaining({
-          method: 'PATCH',
-          body: JSON.stringify({ sprintId: 'sprint-1' }),
-        }),
-      ),
-    );
-
-    const planned = screen.getByRole('region', { name: /planned sprints/i });
-    expect(within(planned).getByText('Wire auth session cookie flow')).toBeInTheDocument();
+    const timeline = screen.getByRole('region', { name: /sprint timeline/i });
+    expect(within(timeline).getByText('Sprint 2026-05 Platform')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /start sprint 2026-05 platform/i }));
-    expect(await screen.findByRole('region', { name: /active sprint/i })).toHaveTextContent('Sprint 2026-05 Platform');
+    expect(await screen.findByRole('region', { name: /active sprint sprint 2026-05 platform/i })).toHaveTextContent('Sprint 2026-05 Platform');
 
     fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-05 platform/i }));
     fireEvent.click(screen.getByRole('button', { name: /^complete sprint$/i }));
@@ -1265,11 +1598,11 @@ describe('App', () => {
         '/api/sprints/sprint-1/complete',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ rollover: [{ cardId: 'card-1', sprintId: '' }] }),
+          body: JSON.stringify({ rollover: [] }),
         }),
       ),
     );
-    expect(await screen.findByRole('region', { name: /completed sprints/i })).toHaveTextContent('Sprint 2026-05 Platform');
+    expect(await screen.findByRole('region', { name: /completed sprint sprint 2026-05 platform/i })).toHaveTextContent('Sprint 2026-05 Platform');
   });
 
   it('chooses next-sprint rollover targets when completing the active sprint', async () => {
@@ -1289,6 +1622,9 @@ describe('App', () => {
     ];
     let planningResponse: unknown = {
       boardId: 'board-1',
+      teamId: 'team-platform',
+      teamName: 'Platform Engineering',
+      boards: boardSummaries,
       backlog: [],
       activeSprint: { sprint: currentSprint, cards: activeCards },
       plannedSprints: [{ sprint: nextSprint, cards: [] }],
@@ -1305,15 +1641,21 @@ describe('App', () => {
         if (url === '/api/boards') {
           return jsonResponse(boardSummaries);
         }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
         if (url === '/api/boards/board-1') {
           return jsonResponse(boardFixture);
         }
-        if (url === '/api/planning?boardId=board-1') {
+        if (url === '/api/planning?teamId=team-platform') {
           return jsonResponse(planningResponse);
         }
         if (url === '/api/sprints/sprint-current/complete' && init?.method === 'POST') {
           planningResponse = {
             boardId: 'board-1',
+            teamId: 'team-platform',
+            teamName: 'Platform Engineering',
+            boards: boardSummaries,
             backlog: [{ ...activeCards[1], sprintId: '' }],
             activeSprint: null,
             plannedSprints: [{ sprint: nextSprint, cards: [{ ...activeCards[0], sprintId: nextSprint.id }] }],
@@ -1329,7 +1671,7 @@ describe('App', () => {
     render(<App />);
     await clickPrimaryNavButton(/planning/i);
 
-    expect(await screen.findByRole('region', { name: /active sprint/i })).toHaveTextContent('Sprint 2026-04 Current');
+    expect(await screen.findByRole('region', { name: /active sprint sprint 2026-04 current/i })).toHaveTextContent('Sprint 2026-04 Current');
 
     fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-04 current/i }));
     fireEvent.change(screen.getByLabelText(/completion target for wire auth session cookie flow/i), {
@@ -1351,7 +1693,7 @@ describe('App', () => {
         }),
       ),
     );
-    expect(await screen.findByRole('region', { name: /planned sprints/i })).toHaveTextContent('Wire auth session cookie flow');
+    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-05 follow-up/i })).toHaveTextContent('Wire auth session cookie flow');
   });
 
   it('expands the kanban board and collapses the left navigation', async () => {
@@ -1401,7 +1743,8 @@ describe('App', () => {
     const page = screen.getByRole('region', { name: /card detail page/i });
     expect(within(page).getByRole('heading', { name: /wire auth session cookie flow/i })).toBeInTheDocument();
     expect(within(page).getByText(/map the session cookie lifecycle/i)).toBeInTheDocument();
-    expect(within(page).getByText(/Owner MS/i)).toBeInTheDocument();
+    expect(within(page).getByText(/Assignee Admin/i)).toBeInTheDocument();
+    expect(within(page).getByText('Backend')).toBeInTheDocument();
     expect(within(page).getByText(/Due 2026-04-30/i)).toBeInTheDocument();
     expect(within(page).getByText(/Activity/i)).toBeInTheDocument();
 
@@ -1426,9 +1769,7 @@ describe('App', () => {
     fireEvent.change(within(page).getByLabelText(/priority/i), {
       target: { value: 'urgent' },
     });
-    fireEvent.change(within(page).getByLabelText(/owner initials/i), {
-      target: { value: 'QA' },
-    });
+    expect(within(page).queryByLabelText(/owner initials/i)).not.toBeInTheDocument();
     fireEvent.change(within(page).getByLabelText(/due date/i), {
       target: { value: '2026-05-09' },
     });
@@ -1443,7 +1784,8 @@ describe('App', () => {
             title: 'Wire production auth flow',
             description: 'Document cookie boundaries and refresh behavior.',
             priority: 'urgent',
-            ownerInitials: 'QA',
+            assigneeId: 'user-1',
+            labelNames: ['Backend'],
             due: '2026-05-09',
           }),
         }),
@@ -1459,7 +1801,7 @@ describe('App', () => {
     await clickPrimaryNavButton(/settings/i);
 
     expect(await screen.findByText('admin@example.com')).toBeInTheDocument();
-    expect(screen.getByText('dev@example.com')).toBeInTheDocument();
+    expect(screen.getAllByText('dev@example.com').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Owner').length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByLabelText(/member email/i), {

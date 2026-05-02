@@ -185,7 +185,7 @@ func runMCP(ctx context.Context, args []string, lookup envLookup, stderr io.Writ
 
 func admin(ctx context.Context, args []string, lookup envLookup, stdout io.Writer) error {
 	if len(args) == 0 || args[0] != "create-user" {
-		return errors.New("usage: arqboard admin create-user --email EMAIL --password PASSWORD [--name NAME]")
+		return errors.New("usage: arqboard admin create-user --email EMAIL --password PASSWORD --name NAME")
 	}
 
 	flags := flag.NewFlagSet("admin create-user", flag.ContinueOnError)
