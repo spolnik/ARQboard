@@ -2,6 +2,23 @@ package config
 
 import "testing"
 
+func TestFromEnvUsesOSLookup(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/arqboard?sslmode=disable")
+	t.Setenv("APP_URL", "https://arqboard.example.com")
+	t.Setenv("SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HTTP_ADDR", ":9090")
+	t.Setenv("WEB_DIST_DIR", "dist")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv returned error: %v", err)
+	}
+	if cfg.AppEnv != "production" || cfg.HTTPAddr != ":9090" || cfg.WebDistDir != "dist" {
+		t.Fatalf("cfg = %#v, want production config from environment", cfg)
+	}
+}
+
 func TestLoadUsesLocalDefaultsOutsideProduction(t *testing.T) {
 	cfg, err := Load(func(key string) (string, bool) {
 		return "", false

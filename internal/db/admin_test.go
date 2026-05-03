@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"testing/fstest"
@@ -66,6 +68,15 @@ func TestCreateAdminUserRequiresPool(t *testing.T) {
 	if !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("error = %v, want ErrDatabaseUnavailable", err)
 	}
+
+	_, err = CreateAdminUser(context.Background(), &Connection{Driver: DriverPostgres}, CreateAdminUserParams{
+		Email:       "admin@example.com",
+		Password:    "correct horse battery staple",
+		DisplayName: "Admin",
+	})
+	if !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("postgres without pool error = %v, want ErrDatabaseUnavailable", err)
+	}
 }
 
 func TestCreateAdminUserRejectsUnsupportedConnection(t *testing.T) {
@@ -87,6 +98,26 @@ func TestExplicitUnsupportedDatabaseURLIsRejected(t *testing.T) {
 	err := MigrateUp(context.Background(), "mysql://user:pass@localhost/arqboard", nil)
 	if err == nil {
 		t.Fatal("MigrateUp returned nil error for unsupported database URL")
+	}
+}
+
+func TestOpenRejectsUnsupportedDriversAndCreatesSQLiteDirs(t *testing.T) {
+	ctx := context.Background()
+	if _, err := Open(ctx, "mysql://user:pass@localhost/arqboard"); err == nil {
+		t.Fatal("Open returned nil error for unsupported database URL")
+	}
+
+	root := t.TempDir()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(root, "nested", "arqboard.db"))
+	conn, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open sqlite returned error: %v", err)
+	}
+	conn.Close()
+	(*Connection)(nil).Close()
+
+	if _, err := os.Stat(filepath.Join(root, "nested")); err != nil {
+		t.Fatalf("sqlite directory was not created: %v", err)
 	}
 }
 
@@ -176,6 +207,46 @@ func TestSQLiteMigrationBackfillsEmailDisplayNames(t *testing.T) {
 	}
 	if displayName != "admin" {
 		t.Fatalf("displayName = %q, want admin", displayName)
+	}
+}
+
+func TestSQLiteRepairHelpersHandleNoopSchemas(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := sql.Open(sqlDriverName(DriverSQLite), ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if err := repairSQLiteColumnSystemKey(ctx, sqlDB); err != nil {
+		t.Fatalf("repairSQLiteColumnSystemKey without columns returned error: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "CREATE TABLE columns (id uuid PRIMARY KEY, system_key text)"); err != nil {
+		t.Fatalf("create columns returned error: %v", err)
+	}
+	if err := repairSQLiteColumnSystemKey(ctx, sqlDB); err != nil {
+		t.Fatalf("repairSQLiteColumnSystemKey with system_key returned error: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx, "CREATE TABLE goose_db_version (id integer primary key, version_id integer, is_applied boolean)"); err != nil {
+		t.Fatalf("create goose table returned error: %v", err)
+	}
+	applied, err := sqliteMigrationApplied(ctx, sqlDB, 2)
+	if err != nil {
+		t.Fatalf("sqliteMigrationApplied missing row returned error: %v", err)
+	}
+	if applied {
+		t.Fatal("sqliteMigrationApplied missing row = true, want false")
+	}
+	if _, err := sqlDB.ExecContext(ctx, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (2, true)"); err != nil {
+		t.Fatalf("insert goose version returned error: %v", err)
+	}
+	applied, err = sqliteMigrationApplied(ctx, sqlDB, 2)
+	if err != nil {
+		t.Fatalf("sqliteMigrationApplied applied row returned error: %v", err)
+	}
+	if !applied {
+		t.Fatal("sqliteMigrationApplied applied row = false, want true")
 	}
 }
 
@@ -345,6 +416,9 @@ func TestReadinessChecker(t *testing.T) {
 	if err := (ReadinessChecker{Conn: &Connection{Driver: DriverSQLite}}).Ready(ctx); !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("missing sqlite readiness error = %v, want ErrDatabaseUnavailable", err)
 	}
+	if err := (ReadinessChecker{Conn: &Connection{Driver: DriverPostgres}}).Ready(ctx); !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("missing postgres readiness error = %v, want ErrDatabaseUnavailable", err)
+	}
 	if err := (ReadinessChecker{Conn: &Connection{Driver: DriverUnknown}}).Ready(ctx); !errors.Is(err, ErrDatabaseUnavailable) {
 		t.Fatalf("unknown readiness error = %v, want ErrDatabaseUnavailable", err)
 	}
@@ -453,6 +527,12 @@ func TestDriverAndSQLiteHelpers(t *testing.T) {
 	}
 	if sqliteDSN("sqlite::memory:") != ":memory:" {
 		t.Fatal("sqlite in-memory DSN changed")
+	}
+	if sqliteDSN("sqlite://file:arqboard?mode=memory") != "file:arqboard?mode=memory&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)" {
+		t.Fatal("sqlite file DSN did not append pragmas with ampersand")
+	}
+	if sqliteDSN("sqlite://data/arqboard.db?cache=shared") != filepath.FromSlash("data/arqboard.db")+"?cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)" {
+		t.Fatal("sqlite DSN with existing query did not append pragmas with ampersand")
 	}
 	if sqlitePath("") != "data/arqboard.db" {
 		t.Fatal("empty sqlite path did not use default data path")

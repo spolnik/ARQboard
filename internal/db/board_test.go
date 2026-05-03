@@ -577,6 +577,102 @@ func TestBoardStoreValidationAndNotFoundPaths(t *testing.T) {
 			want: ErrDatabaseUnavailable,
 		},
 		{
+			name: "create board missing database",
+			err: func() error {
+				_, err := (BoardStore{}).CreateBoard(ctx, CreateBoardParams{Name: "Board"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "get board missing database",
+			err: func() error {
+				_, err := (BoardStore{}).GetBoard(ctx, "board")
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "create column missing database",
+			err: func() error {
+				_, err := (BoardStore{}).CreateColumn(ctx, CreateColumnParams{BoardID: "board", Title: "Column"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "create card missing database",
+			err: func() error {
+				_, err := (BoardStore{}).CreateCard(ctx, CreateCardParams{ColumnID: "column", Title: "Card"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "get card detail missing database",
+			err: func() error {
+				_, err := (BoardStore{}).GetCardDetail(ctx, "card")
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "update card missing database",
+			err: func() error {
+				_, err := (BoardStore{}).UpdateCard(ctx, UpdateCardParams{CardID: "card", Title: "Card", Due: "2026-05-09"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "move card missing database",
+			err: func() error {
+				_, err := (BoardStore{}).MoveCard(ctx, MoveCardParams{CardID: "card", ColumnID: "column"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "comment missing database",
+			err: func() error {
+				_, err := (BoardStore{}).CreateCardComment(ctx, CreateCardCommentParams{CardID: "card", Body: "Comment"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "list wiki missing database",
+			err: func() error {
+				_, err := (BoardStore{}).ListWikiPages(ctx)
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "get wiki missing database",
+			err: func() error {
+				_, err := (BoardStore{}).GetWikiPage(ctx, "wiki")
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "create wiki missing database",
+			err: func() error {
+				_, err := (BoardStore{}).CreateWikiPage(ctx, CreateWikiPageParams{Title: "Wiki"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
+			name: "update wiki missing database",
+			err: func() error {
+				_, err := (BoardStore{}).UpdateWikiPage(ctx, UpdateWikiPageParams{PageID: "wiki", Title: "Wiki"})
+				return err
+			}(),
+			want: ErrDatabaseUnavailable,
+		},
+		{
 			name: "create board missing title",
 			err: func() error {
 				_, err := store.CreateBoard(ctx, CreateBoardParams{})
@@ -934,6 +1030,23 @@ func TestBoardHelpers(t *testing.T) {
 	}
 	if placeholder(DriverPostgres, 2) != "$2" || placeholder(DriverSQLite, 2) != "?" {
 		t.Fatalf("placeholder returned unexpected values")
+	}
+	if cardDueText(DriverPostgres) != "COALESCE(due_at::date::text, NULLIF(due_label, ''), '')" {
+		t.Fatal("postgres cardDueText returned unexpected value")
+	}
+	if cardDueText(DriverSQLite) != "COALESCE(substr(due_at, 1, 10), NULLIF(due_label, ''), '')" {
+		t.Fatal("sqlite cardDueText returned unexpected value")
+	}
+	if inferDefaultColumnKey("Todo", 99) != "planned" || inferDefaultColumnKey("Custom", 0) != "planned" || inferDefaultColumnKey("Unknown", 99) != "" {
+		t.Fatal("inferDefaultColumnKey returned unexpected values")
+	}
+	occupied := map[int]bool{0: true, 2: true}
+	next := 0
+	if got := availableColumnPosition(1, occupied, &next); got != 1 || next != 2 {
+		t.Fatalf("availableColumnPosition free preferred = (%d, %d), want (1, 2)", got, next)
+	}
+	if got := availableColumnPosition(0, occupied, &next); got != 3 || next != 4 {
+		t.Fatalf("availableColumnPosition occupied preferred = (%d, %d), want (3, 4)", got, next)
 	}
 }
 

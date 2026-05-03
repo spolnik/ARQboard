@@ -89,6 +89,13 @@ func TestTeamStoreListsCreatesAndUpdatesWorkspaceMembers(t *testing.T) {
 	if createdTeam.Name != "Design Systems" || createdTeam.Slug != "design-systems" {
 		t.Fatalf("created team = %#v, want named design team", createdTeam)
 	}
+	duplicateTeam, err := store.CreateTeam(ctx, CreateTeamParams{Name: "Design Systems"})
+	if err != nil {
+		t.Fatalf("CreateTeam duplicate returned error: %v", err)
+	}
+	if duplicateTeam.Slug != "design-systems-2" {
+		t.Fatalf("duplicate team slug = %q, want design-systems-2", duplicateTeam.Slug)
+	}
 
 	withMember, err := store.AddTeamMember(ctx, AddTeamMemberParams{
 		TeamID: createdTeam.ID,
@@ -100,6 +107,39 @@ func TestTeamStoreListsCreatesAndUpdatesWorkspaceMembers(t *testing.T) {
 	}
 	if !containsTeamMember(withMember.Members, created.UserID, "admin") {
 		t.Fatalf("team members = %#v, want developer admin", withMember.Members)
+	}
+
+	lateMember, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:       "late@example.com",
+		DisplayName: "Late Joiner",
+		Password:    "correct horse battery late",
+		Role:        "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspaceMember late returned error: %v", err)
+	}
+	withLateMember, err := store.AddTeamMember(ctx, AddTeamMemberParams{
+		TeamID: createdTeam.ID,
+		UserID: lateMember.UserID,
+		Role:   "viewer",
+	})
+	if err != nil {
+		t.Fatalf("AddTeamMember late returned error: %v", err)
+	}
+	if !containsTeamMember(withLateMember.Members, lateMember.UserID, "viewer") {
+		t.Fatalf("team members = %#v, want late viewer", withLateMember.Members)
+	}
+
+	renamed, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:       "developer@example.com",
+		DisplayName: "Dev Renamed",
+		Role:        "admin",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspaceMember existing user returned error: %v", err)
+	}
+	if renamed.DisplayName != "Dev Renamed" || renamed.Role != "admin" || renamed.UserID != created.UserID {
+		t.Fatalf("renamed member = %#v, want updated existing developer", renamed)
 	}
 }
 
@@ -132,6 +172,14 @@ func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("missing display name error = %v, want ErrValidation", err)
 	}
+	if _, err := store.CreateWorkspaceMember(ctx, CreateWorkspaceMemberParams{
+		Email:       "person",
+		DisplayName: "Person",
+		Password:    "correct horse battery member",
+		Role:        "member",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("invalid email error = %v, want ErrValidation", err)
+	}
 	if _, err := store.UpdateWorkspaceMember(ctx, UpdateWorkspaceMemberParams{
 		MemberID: "missing",
 		Role:     "viewer",
@@ -153,6 +201,17 @@ func TestTeamStoreValidatesWorkspaceMembers(t *testing.T) {
 		Role:   "member",
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("AddTeamMember missing team error = %v, want ErrNotFound", err)
+	}
+	teams, err := store.ListTeams(ctx)
+	if err != nil {
+		t.Fatalf("ListTeams returned error: %v", err)
+	}
+	if _, err := store.AddTeamMember(ctx, AddTeamMemberParams{
+		TeamID: teams[0].ID,
+		UserID: "missing",
+		Role:   "member",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("AddTeamMember non-workspace user error = %v, want ErrValidation", err)
 	}
 }
 
