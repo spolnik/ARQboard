@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -73,6 +74,16 @@ func TestReadyzSucceedsWhenCheckerSucceeds(t *testing.T) {
 	}
 }
 
+func TestReadyzSucceedsWithoutChecker(t *testing.T) {
+	router := NewRouter(Options{})
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
 func TestRouterServesReactAppAndFallback(t *testing.T) {
 	staticFS := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<main>ARQboard app</main>")},
@@ -93,6 +104,18 @@ func TestRouterServesReactAppAndFallback(t *testing.T) {
 		if res.Body.String() != "<main>ARQboard app</main>" {
 			t.Fatalf("%s body = %q", path, res.Body.String())
 		}
+	}
+
+	asset := httptest.NewRecorder()
+	router.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+	if asset.Code != http.StatusOK {
+		t.Fatalf("asset status = %d, want %d", asset.Code, http.StatusOK)
+	}
+	if !strings.Contains(asset.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("asset Content-Type = %q, want javascript", asset.Header().Get("Content-Type"))
+	}
+	if asset.Body.String() != "console.log('ok')" {
+		t.Fatalf("asset body = %q", asset.Body.String())
 	}
 }
 
@@ -264,6 +287,37 @@ func TestRouterLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	}
 }
 
+func TestRouterLogoutWithoutSessionDoesNotNeedStore(t *testing.T) {
+	router := NewRouter(Options{})
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil))
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if cookie := res.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", cookie)
+	}
+}
+
+func TestSessionCookiesUseSecureFlagForTLS(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://arqboard.example.com", nil)
+	req.TLS = &tls.ConnectionState{}
+
+	cookie := sessionCookie(req, "token-123", time.Now().Add(-time.Minute))
+	if !cookie.Secure {
+		t.Fatal("session cookie Secure = false, want true for TLS")
+	}
+	if cookie.MaxAge != 1 {
+		t.Fatalf("expired session max age = %d, want clamped 1", cookie.MaxAge)
+	}
+
+	expired := expiredSessionCookie(req)
+	if !expired.Secure || expired.MaxAge != -1 {
+		t.Fatalf("expired cookie = %#v, want secure deletion cookie", expired)
+	}
+}
+
 func TestRouterAuthRejectsMissingOrInvalidCredentials(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -275,10 +329,13 @@ func TestRouterAuthRejectsMissingOrInvalidCredentials(t *testing.T) {
 		want      int
 	}{
 		{name: "missing me cookie", store: &fakeAuthStore{}, method: http.MethodGet, path: "/api/me", want: http.StatusUnauthorized},
+		{name: "me database unavailable", store: &fakeAuthStore{err: db.ErrDatabaseUnavailable}, method: http.MethodGet, path: "/api/me", addCookie: true, want: http.StatusServiceUnavailable},
 		{name: "bad login json", store: &fakeAuthStore{}, method: http.MethodPost, path: "/api/auth/login", body: `{`, want: http.StatusBadRequest},
 		{name: "blank login fields", store: &fakeAuthStore{}, method: http.MethodPost, path: "/api/auth/login", body: `{"email":"","password":""}`, want: http.StatusBadRequest},
 		{name: "invalid login", store: &fakeAuthStore{err: db.ErrInvalidCredentials}, method: http.MethodPost, path: "/api/auth/login", body: `{"email":"admin@example.com","password":"wrong"}`, want: http.StatusUnauthorized},
+		{name: "login database unavailable", store: &fakeAuthStore{err: db.ErrDatabaseUnavailable}, method: http.MethodPost, path: "/api/auth/login", body: `{"email":"admin@example.com","password":"correct horse battery staple"}`, want: http.StatusServiceUnavailable},
 		{name: "revoked me session", store: &fakeAuthStore{err: db.ErrUnauthenticated}, method: http.MethodGet, path: "/api/me", addCookie: true, want: http.StatusUnauthorized},
+		{name: "logout database unavailable", store: &fakeAuthStore{err: db.ErrDatabaseUnavailable}, method: http.MethodPost, path: "/api/auth/logout", addCookie: true, want: http.StatusServiceUnavailable},
 	}
 
 	for _, tt := range tests {
@@ -293,6 +350,36 @@ func TestRouterAuthRejectsMissingOrInvalidCredentials(t *testing.T) {
 
 			if res.Code != tt.want {
 				t.Fatalf("status = %d, want %d", res.Code, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouterAuthReportsMissingStore(t *testing.T) {
+	router := NewRouter(Options{})
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		body      string
+		addCookie bool
+	}{
+		{name: "me", method: http.MethodGet, path: "/api/me"},
+		{name: "login", method: http.MethodPost, path: "/api/auth/login", body: `{"email":"admin@example.com","password":"correct horse battery staple"}`},
+		{name: "logout", method: http.MethodPost, path: "/api/auth/logout", addCookie: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			if tt.addCookie {
+				req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			}
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
 			}
 		})
 	}
@@ -820,6 +907,49 @@ func TestRouterHandlesMissingStoreAndStaticMisses(t *testing.T) {
 	router.ServeHTTP(apiMiss, httptest.NewRequest(http.MethodGet, "/api/missing", nil))
 	if apiMiss.Code != http.StatusNotFound {
 		t.Fatalf("api miss status = %d, want %d", apiMiss.Code, http.StatusNotFound)
+	}
+}
+
+func TestRouterReportsUnavailableStoresAcrossAPIs(t *testing.T) {
+	adminRouter := NewRouter(Options{AuthStore: &fakeAuthStore{user: testUser()}})
+	tests := []struct {
+		name      string
+		router    http.Handler
+		method    string
+		path      string
+		body      string
+		addCookie bool
+	}{
+		{name: "workspaces", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/workspaces"},
+		{name: "boards", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/boards"},
+		{name: "board by id", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/boards/board-1"},
+		{name: "planning", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/planning"},
+		{name: "start sprint", router: NewRouter(Options{}), method: http.MethodPost, path: "/api/sprints/sprint-1/start"},
+		{name: "card detail", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/cards/card-1"},
+		{name: "card comments", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/cards/card-1/comments"},
+		{name: "wiki list", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/wiki"},
+		{name: "wiki page", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/wiki/page-1"},
+		{name: "teams", router: NewRouter(Options{}), method: http.MethodGet, path: "/api/teams"},
+		{name: "create team", router: NewRouter(Options{}), method: http.MethodPost, path: "/api/teams", body: `{"name":"Design"}`},
+		{name: "add team member", router: NewRouter(Options{}), method: http.MethodPost, path: "/api/teams/team-1/members", body: `{"userId":"user-1","role":"member"}`},
+		{name: "admin list members", router: adminRouter, method: http.MethodGet, path: "/api/members", addCookie: true},
+		{name: "admin create member", router: adminRouter, method: http.MethodPost, path: "/api/members", body: `{"email":"qa@example.com","displayName":"QA","password":"correct horse battery qa"}`, addCookie: true},
+		{name: "admin update member", router: adminRouter, method: http.MethodPatch, path: "/api/members/member-1", body: `{"role":"viewer"}`, addCookie: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			if tt.addCookie {
+				req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			}
+			res := httptest.NewRecorder()
+			tt.router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+			}
+		})
 	}
 }
 
