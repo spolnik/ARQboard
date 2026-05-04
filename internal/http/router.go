@@ -23,12 +23,13 @@ type Readiness interface {
 }
 
 type Options struct {
-	Readiness  Readiness
-	BoardStore BoardStore
-	AuthStore  AuthStore
-	TeamStore  TeamStore
-	StaticFS   fs.FS
-	Logger     *slog.Logger
+	Readiness   Readiness
+	BoardStore  BoardStore
+	AuthStore   AuthStore
+	TeamStore   TeamStore
+	AccessStore AccessStore
+	StaticFS    fs.FS
+	Logger      *slog.Logger
 }
 
 type BoardStore interface {
@@ -70,6 +71,18 @@ type TeamStore interface {
 	UpdateWorkspaceMember(context.Context, db.UpdateWorkspaceMemberParams) (db.WorkspaceMember, error)
 }
 
+type AccessStore interface {
+	ListTeamsForUser(context.Context, db.User) ([]db.Team, error)
+	ListBoardsForUser(context.Context, db.User) ([]db.BoardSummary, error)
+	ListWikiPagesForUser(context.Context, db.User) ([]db.WikiPage, error)
+	AuthorizeTeam(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeBoard(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeColumn(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeCard(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeSprint(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeWikiPage(context.Context, db.User, string, db.AccessLevel) error
+}
+
 type errorBody struct {
 	Error apiError `json:"error"`
 }
@@ -104,31 +117,31 @@ func NewRouter(opts Options) http.Handler {
 				r.Use(requireAuth(opts.AuthStore))
 			}
 			r.Get("/workspaces", listWorkspaces(opts.BoardStore))
-			r.Get("/teams", listTeams(opts.TeamStore))
-			r.Post("/teams", createTeam(opts.TeamStore))
-			r.Post("/teams/{teamID}/members", addTeamMember(opts.TeamStore))
-			r.Get("/boards", listBoards(opts.BoardStore))
-			r.Post("/boards", createBoard(opts.BoardStore))
-			r.Get("/boards/default", defaultBoard(opts.BoardStore))
-			r.Get("/boards/{boardID}", boardByID(opts.BoardStore))
-			r.Post("/boards/{boardID}/columns", createColumn(opts.BoardStore))
-			r.Get("/planning", planningDashboard(opts.BoardStore))
-			r.Post("/sprints", createSprint(opts.BoardStore))
-			r.Post("/sprints/{sprintID}/start", startSprint(opts.BoardStore))
-			r.Post("/sprints/{sprintID}/complete", completeSprint(opts.BoardStore))
-			r.Patch("/columns/{columnID}", updateColumn(opts.BoardStore))
-			r.Post("/cards", createCard(opts.BoardStore))
-			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore))
-			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore))
-			r.Patch("/cards/{cardID}/sprint", assignCardToSprint(opts.BoardStore))
-			r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore))
-			r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore))
-			r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore))
-			r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore))
-			r.Get("/wiki", listWikiPages(opts.BoardStore))
-			r.Post("/wiki", createWikiPage(opts.BoardStore))
-			r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore))
-			r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore))
+			r.Get("/teams", listTeams(opts.TeamStore, opts.AccessStore))
+			r.Post("/teams", createTeam(opts.TeamStore, opts.AccessStore))
+			r.Post("/teams/{teamID}/members", addTeamMember(opts.TeamStore, opts.AccessStore))
+			r.Get("/boards", listBoards(opts.BoardStore, opts.AccessStore))
+			r.Post("/boards", createBoard(opts.BoardStore, opts.AccessStore))
+			r.Get("/boards/default", defaultBoard(opts.BoardStore, opts.AccessStore))
+			r.Get("/boards/{boardID}", boardByID(opts.BoardStore, opts.AccessStore))
+			r.Post("/boards/{boardID}/columns", createColumn(opts.BoardStore, opts.AccessStore))
+			r.Get("/planning", planningDashboard(opts.BoardStore, opts.AccessStore))
+			r.Post("/sprints", createSprint(opts.BoardStore, opts.AccessStore))
+			r.Post("/sprints/{sprintID}/start", startSprint(opts.BoardStore, opts.AccessStore))
+			r.Post("/sprints/{sprintID}/complete", completeSprint(opts.BoardStore, opts.AccessStore))
+			r.Patch("/columns/{columnID}", updateColumn(opts.BoardStore, opts.AccessStore))
+			r.Post("/cards", createCard(opts.BoardStore, opts.AccessStore))
+			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore, opts.AccessStore))
+			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore, opts.AccessStore))
+			r.Patch("/cards/{cardID}/sprint", assignCardToSprint(opts.BoardStore, opts.AccessStore))
+			r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore, opts.AccessStore))
+			r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore, opts.AccessStore))
+			r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore, opts.AccessStore))
+			r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore, opts.AccessStore))
+			r.Get("/wiki", listWikiPages(opts.BoardStore, opts.AccessStore))
+			r.Post("/wiki", createWikiPage(opts.BoardStore, opts.AccessStore))
+			r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore, opts.AccessStore))
+			r.Patch("/wiki/{pageID}", updateWikiPage(opts.BoardStore, opts.AccessStore))
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin(opts.AuthStore))
 				r.Get("/members", listMembers(opts.TeamStore))
@@ -215,6 +228,7 @@ type createCardCommentRequest struct {
 }
 
 type wikiPageRequest struct {
+	BoardID      string `json:"boardId"`
 	Title        string `json:"title"`
 	BodyMarkdown string `json:"bodyMarkdown"`
 }
@@ -238,6 +252,7 @@ type loginRequest struct {
 const sessionCookieName = "arqboard_session"
 
 type loggerContextKey struct{}
+type currentUserContextKey struct{}
 
 func login(store AuthStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -320,12 +335,13 @@ func requireAuth(store AuthStore) func(http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
 				return
 			}
-			if _, err := store.CurrentUser(r.Context(), cookie.Value); err != nil {
+			user, err := store.CurrentUser(r.Context(), cookie.Value)
+			if err != nil {
 				writeAuthError(w, r, err)
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), currentUserContextKey{}, user)))
 		})
 	}
 }
@@ -344,10 +360,14 @@ func requireAdmin(store AuthStore) func(http.Handler) http.Handler {
 				return
 			}
 
-			user, err := store.CurrentUser(r.Context(), cookie.Value)
-			if err != nil {
-				writeAuthError(w, r, err)
-				return
+			user, ok := authenticatedUser(r)
+			if !ok {
+				var err error
+				user, err = store.CurrentUser(r.Context(), cookie.Value)
+				if err != nil {
+					writeAuthError(w, r, err)
+					return
+				}
 			}
 			if !user.IsAdmin {
 				writeError(w, http.StatusForbidden, "forbidden", "admin access required")
@@ -359,14 +379,52 @@ func requireAdmin(store AuthStore) func(http.Handler) http.Handler {
 	}
 }
 
-func defaultBoard(store BoardStore) http.HandlerFunc {
+func authenticatedUser(r *http.Request) (db.User, bool) {
+	user, ok := r.Context().Value(currentUserContextKey{}).(db.User)
+	return user, ok
+}
+
+func authorizeRequest(w http.ResponseWriter, r *http.Request, access AccessStore, check func(context.Context, db.User) error) bool {
+	if access == nil {
+		return true
+	}
+	user, ok := authenticatedUser(r)
+	if !ok {
+		return true
+	}
+	if err := check(r.Context(), user); err != nil {
+		writeDataStoreError(w, r, err, "access_store", "access store is unavailable")
+		return false
+	}
+	return true
+}
+
+func defaultBoard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		board, err := store.GetDefaultBoard(r.Context())
+		var board db.Board
+		var err error
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok {
+				boards, listErr := access.ListBoardsForUser(r.Context(), user)
+				if listErr != nil {
+					writeDataStoreError(w, r, listErr, "access_store", "access store is unavailable")
+					return
+				}
+				if len(boards) == 0 {
+					writeStoreError(w, r, db.ErrNotFound)
+					return
+				}
+				board, err = store.GetBoard(r.Context(), boards[0].ID)
+			}
+		}
+		if board.ID == "" && err == nil {
+			board, err = store.GetDefaultBoard(r.Context())
+		}
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -393,14 +451,23 @@ func listWorkspaces(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func listBoards(store BoardStore) http.HandlerFunc {
+func listBoards(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		boards, err := store.ListBoards(r.Context())
+		var boards []db.BoardSummary
+		var err error
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok {
+				boards, err = access.ListBoardsForUser(r.Context(), user)
+			}
+		}
+		if boards == nil && err == nil {
+			boards, err = store.ListBoards(r.Context())
+		}
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -410,14 +477,23 @@ func listBoards(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func listTeams(store TeamStore) http.HandlerFunc {
+func listTeams(store TeamStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
 			return
 		}
 
-		teams, err := store.ListTeams(r.Context())
+		var teams []db.Team
+		var err error
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok {
+				teams, err = access.ListTeamsForUser(r.Context(), user)
+			}
+		}
+		if teams == nil && err == nil {
+			teams, err = store.ListTeams(r.Context())
+		}
 		if err != nil {
 			writeTeamStoreError(w, r, err)
 			return
@@ -427,7 +503,7 @@ func listTeams(store TeamStore) http.HandlerFunc {
 	}
 }
 
-func createTeam(store TeamStore) http.HandlerFunc {
+func createTeam(store TeamStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
@@ -443,6 +519,12 @@ func createTeam(store TeamStore) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_team", "name is required")
 			return
 		}
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok && !user.IsAdmin {
+				writeError(w, http.StatusForbidden, "forbidden", "admin access required")
+				return
+			}
+		}
 
 		team, err := store.CreateTeam(r.Context(), db.CreateTeamParams{Name: payload.Name})
 		if err != nil {
@@ -454,7 +536,7 @@ func createTeam(store TeamStore) http.HandlerFunc {
 	}
 }
 
-func addTeamMember(store TeamStore) http.HandlerFunc {
+func addTeamMember(store TeamStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "team store is unavailable")
@@ -471,8 +553,15 @@ func addTeamMember(store TeamStore) http.HandlerFunc {
 			return
 		}
 
+		teamID := chi.URLParam(r, "teamID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeTeam(ctx, user, teamID, db.AccessManage)
+		}) {
+			return
+		}
+
 		team, err := store.AddTeamMember(r.Context(), db.AddTeamMemberParams{
-			TeamID: chi.URLParam(r, "teamID"),
+			TeamID: teamID,
 			UserID: payload.UserID,
 			Role:   payload.Role,
 		})
@@ -485,14 +574,20 @@ func addTeamMember(store TeamStore) http.HandlerFunc {
 	}
 }
 
-func boardByID(store BoardStore) http.HandlerFunc {
+func boardByID(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		board, err := store.GetBoard(r.Context(), chi.URLParam(r, "boardID"))
+		boardID := chi.URLParam(r, "boardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeBoard(ctx, user, boardID, db.AccessRead)
+		}) {
+			return
+		}
+		board, err := store.GetBoard(r.Context(), boardID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -502,7 +597,7 @@ func boardByID(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createBoard(store BoardStore) http.HandlerFunc {
+func createBoard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -518,6 +613,15 @@ func createBoard(store BoardStore) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_board", "name is required")
 			return
 		}
+		if access != nil && strings.TrimSpace(payload.TeamID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_board", "teamId is required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeTeam(ctx, user, payload.TeamID, db.AccessManage)
+		}) {
+			return
+		}
 
 		board, err := store.CreateBoard(r.Context(), db.CreateBoardParams{Name: payload.Name, TeamID: payload.TeamID})
 		if err != nil {
@@ -529,7 +633,7 @@ func createBoard(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createColumn(store BoardStore) http.HandlerFunc {
+func createColumn(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -546,8 +650,14 @@ func createColumn(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		boardID := chi.URLParam(r, "boardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeBoard(ctx, user, boardID, db.AccessManage)
+		}) {
+			return
+		}
 		board, err := store.CreateColumn(r.Context(), db.CreateColumnParams{
-			BoardID: chi.URLParam(r, "boardID"),
+			BoardID: boardID,
 			Title:   payload.Title,
 		})
 		if err != nil {
@@ -559,7 +669,7 @@ func createColumn(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func planningDashboard(store BoardStore) http.HandlerFunc {
+func planningDashboard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -567,8 +677,35 @@ func planningDashboard(store BoardStore) http.HandlerFunc {
 		}
 
 		scopeID := r.URL.Query().Get("teamId")
+		scopeIsTeam := scopeID != ""
 		if scopeID == "" {
 			scopeID = r.URL.Query().Get("boardId")
+		}
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok {
+				if scopeID == "" {
+					teams, err := access.ListTeamsForUser(r.Context(), user)
+					if err != nil {
+						writeDataStoreError(w, r, err, "access_store", "access store is unavailable")
+						return
+					}
+					if len(teams) == 0 {
+						writeStoreError(w, r, db.ErrNotFound)
+						return
+					}
+					scopeID = teams[0].ID
+					scopeIsTeam = true
+				}
+				if scopeIsTeam {
+					if err := access.AuthorizeTeam(r.Context(), user, scopeID, db.AccessRead); err != nil {
+						writeDataStoreError(w, r, err, "access_store", "access store is unavailable")
+						return
+					}
+				} else if err := access.AuthorizeBoard(r.Context(), user, scopeID, db.AccessRead); err != nil {
+					writeDataStoreError(w, r, err, "access_store", "access store is unavailable")
+					return
+				}
+			}
 		}
 		dashboard, err := store.GetPlanningDashboard(r.Context(), scopeID)
 		if err != nil {
@@ -580,7 +717,7 @@ func planningDashboard(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createSprint(store BoardStore) http.HandlerFunc {
+func createSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -594,6 +731,14 @@ func createSprint(store BoardStore) http.HandlerFunc {
 		}
 		if strings.TrimSpace(payload.Name) == "" {
 			writeError(w, http.StatusBadRequest, "invalid_sprint", "name is required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			if strings.TrimSpace(payload.TeamID) != "" {
+				return access.AuthorizeTeam(ctx, user, payload.TeamID, db.AccessManage)
+			}
+			return access.AuthorizeBoard(ctx, user, payload.BoardID, db.AccessManage)
+		}) {
 			return
 		}
 
@@ -614,14 +759,20 @@ func createSprint(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func startSprint(store BoardStore) http.HandlerFunc {
+func startSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		sprint, err := store.StartSprint(r.Context(), chi.URLParam(r, "sprintID"))
+		sprintID := chi.URLParam(r, "sprintID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeSprint(ctx, user, sprintID, db.AccessManage)
+		}) {
+			return
+		}
+		sprint, err := store.StartSprint(r.Context(), sprintID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -631,7 +782,7 @@ func startSprint(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func completeSprint(store BoardStore) http.HandlerFunc {
+func completeSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -653,8 +804,14 @@ func completeSprint(store BoardStore) http.HandlerFunc {
 			})
 		}
 
+		sprintID := chi.URLParam(r, "sprintID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeSprint(ctx, user, sprintID, db.AccessManage)
+		}) {
+			return
+		}
 		sprint, err := store.CompleteSprint(r.Context(), db.CompleteSprintParams{
-			SprintID: chi.URLParam(r, "sprintID"),
+			SprintID: sprintID,
 			Rollover: rollover,
 		})
 		if err != nil {
@@ -666,7 +823,7 @@ func completeSprint(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func updateColumn(store BoardStore) http.HandlerFunc {
+func updateColumn(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -683,8 +840,14 @@ func updateColumn(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		columnID := chi.URLParam(r, "columnID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeColumn(ctx, user, columnID, db.AccessManage)
+		}) {
+			return
+		}
 		board, err := store.UpdateColumn(r.Context(), db.UpdateColumnParams{
-			ColumnID: chi.URLParam(r, "columnID"),
+			ColumnID: columnID,
 			Title:    payload.Title,
 		})
 		if err != nil {
@@ -696,7 +859,7 @@ func updateColumn(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createCard(store BoardStore) http.HandlerFunc {
+func createCard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -710,6 +873,11 @@ func createCard(store BoardStore) http.HandlerFunc {
 		}
 		if strings.TrimSpace(payload.ColumnID) == "" || strings.TrimSpace(payload.Title) == "" {
 			writeError(w, http.StatusBadRequest, "invalid_card", "columnId and title are required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeColumn(ctx, user, payload.ColumnID, db.AccessWrite)
+		}) {
 			return
 		}
 
@@ -728,14 +896,20 @@ func createCard(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func cardDetail(store BoardStore) http.HandlerFunc {
+func cardDetail(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessRead)
+		}) {
+			return
+		}
+		detail, err := store.GetCardDetail(r.Context(), cardID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -745,7 +919,7 @@ func cardDetail(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func updateCard(store BoardStore) http.HandlerFunc {
+func updateCard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -762,8 +936,14 @@ func updateCard(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessWrite)
+		}) {
+			return
+		}
 		card, err := store.UpdateCard(r.Context(), db.UpdateCardParams{
-			CardID:      chi.URLParam(r, "cardID"),
+			CardID:      cardID,
 			Title:       payload.Title,
 			Description: payload.Description,
 			Priority:    payload.Priority,
@@ -780,7 +960,7 @@ func updateCard(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func assignCardToSprint(store BoardStore) http.HandlerFunc {
+func assignCardToSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -793,8 +973,20 @@ func assignCardToSprint(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			if err := access.AuthorizeCard(ctx, user, cardID, db.AccessWrite); err != nil {
+				return err
+			}
+			if strings.TrimSpace(payload.SprintID) != "" {
+				return access.AuthorizeSprint(ctx, user, payload.SprintID, db.AccessWrite)
+			}
+			return nil
+		}) {
+			return
+		}
 		card, err := store.AssignCardToSprint(r.Context(), db.AssignCardToSprintParams{
-			CardID:   chi.URLParam(r, "cardID"),
+			CardID:   cardID,
 			SprintID: payload.SprintID,
 		})
 		if err != nil {
@@ -806,7 +998,7 @@ func assignCardToSprint(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func moveCard(store BoardStore) http.HandlerFunc {
+func moveCard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -823,8 +1015,17 @@ func moveCard(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			if err := access.AuthorizeCard(ctx, user, cardID, db.AccessWrite); err != nil {
+				return err
+			}
+			return access.AuthorizeColumn(ctx, user, payload.ColumnID, db.AccessWrite)
+		}) {
+			return
+		}
 		board, err := store.MoveCard(r.Context(), db.MoveCardParams{
-			CardID:   chi.URLParam(r, "cardID"),
+			CardID:   cardID,
 			ColumnID: payload.ColumnID,
 			Position: payload.Position,
 		})
@@ -837,14 +1038,20 @@ func moveCard(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func cardComments(store BoardStore) http.HandlerFunc {
+func cardComments(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		detail, err := store.GetCardDetail(r.Context(), chi.URLParam(r, "cardID"))
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessRead)
+		}) {
+			return
+		}
+		detail, err := store.GetCardDetail(r.Context(), cardID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -854,7 +1061,7 @@ func cardComments(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createCardComment(store BoardStore) http.HandlerFunc {
+func createCardComment(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -871,8 +1078,14 @@ func createCardComment(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		cardID := chi.URLParam(r, "cardID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessWrite)
+		}) {
+			return
+		}
 		detail, err := store.CreateCardComment(r.Context(), db.CreateCardCommentParams{
-			CardID: chi.URLParam(r, "cardID"),
+			CardID: cardID,
 			Body:   payload.Body,
 		})
 		if err != nil {
@@ -884,14 +1097,23 @@ func createCardComment(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func listWikiPages(store BoardStore) http.HandlerFunc {
+func listWikiPages(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		pages, err := store.ListWikiPages(r.Context())
+		var pages []db.WikiPage
+		var err error
+		if access != nil {
+			if user, ok := authenticatedUser(r); ok {
+				pages, err = access.ListWikiPagesForUser(r.Context(), user)
+			}
+		}
+		if pages == nil && err == nil {
+			pages, err = store.ListWikiPages(r.Context())
+		}
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -901,14 +1123,20 @@ func listWikiPages(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func wikiPage(store BoardStore) http.HandlerFunc {
+func wikiPage(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		page, err := store.GetWikiPage(r.Context(), chi.URLParam(r, "pageID"))
+		pageID := chi.URLParam(r, "pageID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeWikiPage(ctx, user, pageID, db.AccessRead)
+		}) {
+			return
+		}
+		page, err := store.GetWikiPage(r.Context(), pageID)
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -918,7 +1146,7 @@ func wikiPage(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func createWikiPage(store BoardStore) http.HandlerFunc {
+func createWikiPage(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -934,8 +1162,18 @@ func createWikiPage(store BoardStore) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_wiki_page", "title is required")
 			return
 		}
+		if access != nil && strings.TrimSpace(payload.BoardID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_wiki_page", "boardId is required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeBoard(ctx, user, payload.BoardID, db.AccessWrite)
+		}) {
+			return
+		}
 
 		page, err := store.CreateWikiPage(r.Context(), db.CreateWikiPageParams{
+			BoardID:      payload.BoardID,
 			Title:        payload.Title,
 			BodyMarkdown: payload.BodyMarkdown,
 		})
@@ -948,7 +1186,7 @@ func createWikiPage(store BoardStore) http.HandlerFunc {
 	}
 }
 
-func updateWikiPage(store BoardStore) http.HandlerFunc {
+func updateWikiPage(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
@@ -965,8 +1203,14 @@ func updateWikiPage(store BoardStore) http.HandlerFunc {
 			return
 		}
 
+		pageID := chi.URLParam(r, "pageID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeWikiPage(ctx, user, pageID, db.AccessWrite)
+		}) {
+			return
+		}
 		page, err := store.UpdateWikiPage(r.Context(), db.UpdateWikiPageParams{
-			PageID:       chi.URLParam(r, "pageID"),
+			PageID:       pageID,
 			Title:        payload.Title,
 			BodyMarkdown: payload.BodyMarkdown,
 		})
@@ -1183,6 +1427,10 @@ func writeDataStoreError(w http.ResponseWriter, r *http.Request, err error, comp
 		status = http.StatusNotFound
 		code = "not_found"
 		message = "resource not found"
+	case errors.Is(err, db.ErrForbidden):
+		status = http.StatusForbidden
+		code = "forbidden"
+		message = "access denied"
 	case errors.Is(err, db.ErrDatabaseUnavailable):
 		status = http.StatusServiceUnavailable
 		code = "store_unavailable"

@@ -626,6 +626,9 @@ function App() {
   const rightRailVisible = rightRailAttached && !isRightRailCollapsed;
   const planning = planningDashboard ?? emptyPlanningDashboard;
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
+  const canWriteSelectedTeam = canWriteTeam(selectedTeam, currentUser);
+  const canManageSelectedTeam = canManageTeam(selectedTeam, currentUser);
+  const canUseSettings = Boolean(currentUser?.isAdmin || canManageSelectedTeam);
   const boardOptions = useMemo(() => (selectedTeamId ? boards.filter((summary) => summary.teamId === selectedTeamId) : boards), [boards, selectedTeamId]);
   const timelinePlans = [
     ...planning.completedSprints,
@@ -652,6 +655,12 @@ function App() {
     setBoard(null);
     setSelectedCardId('');
   }, [boardOptions, selectedBoardId, selectedTeamId]);
+
+  useEffect(() => {
+    if (activeView === 'settings' && !canUseSettings) {
+      setActiveView('boards');
+    }
+  }, [activeView, canUseSettings]);
 
   const filteredColumns = useMemo(() => {
     if (!board) {
@@ -739,6 +748,10 @@ function App() {
       setError('Select a team before creating a board.');
       return;
     }
+    if (!canManageSelectedTeam) {
+      setError('Team admin access is required to create boards.');
+      return;
+    }
 
     try {
       const nextBoard = normalizeBoard(
@@ -819,6 +832,10 @@ function App() {
     if (!board) {
       return;
     }
+    if (!canManageSelectedTeam) {
+      setError('Team admin access is required to add columns.');
+      return;
+    }
 
     const title = newColumnTitle.trim();
     if (!title) {
@@ -844,6 +861,10 @@ function App() {
   }
 
   function startRenamingColumn(column: Column) {
+    if (!canManageSelectedTeam) {
+      setError('Team admin access is required to rename columns.');
+      return;
+    }
     setRenamingColumn(column);
     setColumnTitle(column.title);
   }
@@ -851,6 +872,10 @@ function App() {
   async function renameColumn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!renamingColumn) {
+      return;
+    }
+    if (!canManageSelectedTeam) {
+      setError('Team admin access is required to rename columns.');
       return;
     }
 
@@ -878,6 +903,10 @@ function App() {
   }
 
   function openCreateCard() {
+    if (!board || !canWriteSelectedTeam) {
+      setError('Team write access is required to create cards.');
+      return;
+    }
     setNewCardTitle('');
     setNewCardAssigneeId(defaultAssigneeId(board, currentUser));
     setNewCardLabels('');
@@ -887,6 +916,10 @@ function App() {
   async function createCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!board) {
+      return;
+    }
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to create cards.');
       return;
     }
 
@@ -933,6 +966,10 @@ function App() {
   }
 
   async function moveCard(cardId: string, columnId: string, position: number) {
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to move cards.');
+      return;
+    }
     try {
       const nextBoard = await requestJSON<Board>(`/api/cards/${cardId}/move`, {
         method: 'PATCH',
@@ -950,6 +987,10 @@ function App() {
     if (!selectedCard) {
       return;
     }
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to edit cards.');
+      return;
+    }
     setCardForm(formFromCard(selectedCard));
     setIsEditingCard(true);
   }
@@ -957,6 +998,10 @@ function App() {
   async function updateSelectedCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedCard) {
+      return;
+    }
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to edit cards.');
       return;
     }
 
@@ -1006,6 +1051,10 @@ function App() {
     if (!selectedCard) {
       return;
     }
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to comment on cards.');
+      return;
+    }
 
     const body = newComment.trim();
     if (!body) {
@@ -1042,6 +1091,10 @@ function App() {
   }
 
   function startCreatingWikiPage() {
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to create wiki pages.');
+      return;
+    }
     setSelectedWikiPage(null);
     setWikiForm({ title: '', bodyMarkdown: '' });
     setIsCreatingWikiPage(true);
@@ -1050,6 +1103,10 @@ function App() {
 
   async function submitWikiPage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canWriteSelectedTeam) {
+      setError('Team write access is required to save wiki pages.');
+      return;
+    }
     const payload = {
       title: wikiForm.title.trim(),
       bodyMarkdown: wikiForm.bodyMarkdown.trim(),
@@ -1060,9 +1117,17 @@ function App() {
 
     try {
       const url = isCreatingWikiPage || !selectedWikiPage ? '/api/wiki' : `/api/wiki/${selectedWikiPage.id}`;
+      const body =
+        isCreatingWikiPage || !selectedWikiPage
+          ? { ...payload, boardId: selectedBoardId || board?.id || '' }
+          : payload;
+      if ('boardId' in body && !body.boardId) {
+        setError('Select a board before creating a wiki page.');
+        return;
+      }
       const page = await requestJSON<WikiPage>(url, {
         method: isCreatingWikiPage || !selectedWikiPage ? 'POST' : 'PATCH',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
       });
       setBoard((current) => upsertWikiPageInBoard(current, page));
       setSelectedWikiPage(page);
@@ -1123,6 +1188,10 @@ function App() {
       setPlanningMessage('Select a team before creating a sprint.');
       return;
     }
+    if (!canManageSelectedTeam) {
+      setPlanningMessage('Team admin access is required to create sprints.');
+      return;
+    }
     if (!boardOptions.length) {
       setPlanningMessage('Create a board for this team before creating a sprint.');
       return;
@@ -1155,6 +1224,10 @@ function App() {
   }
 
   async function movePlanningCard(card: Card, sprintId: string) {
+    if (!canWriteSelectedTeam) {
+      setPlanningMessage('Team write access is required to plan cards.');
+      return;
+    }
     try {
       const assignedCard = normalizeCard(
         await requestJSON<Card>(`/api/cards/${card.id}/sprint`, {
@@ -1172,6 +1245,10 @@ function App() {
   }
 
   async function startPlanningSprint(sprint: Sprint) {
+    if (!canManageSelectedTeam) {
+      setPlanningMessage('Team admin access is required to start sprints.');
+      return;
+    }
     try {
       const startedSprint = await requestJSON<Sprint>(`/api/sprints/${sprint.id}/start`, { method: 'POST' });
       setPlanningDashboard((current) => startSprintInDashboard(current ?? emptyPlanningDashboard, startedSprint));
@@ -1185,6 +1262,10 @@ function App() {
   }
 
   function beginPlanningSprintCompletion(sprint: Sprint) {
+    if (!canManageSelectedTeam) {
+      setPlanningMessage('Team admin access is required to complete sprints.');
+      return;
+    }
     const activeCards = planning.activeSprint?.sprint.id === sprint.id ? planning.activeSprint.cards : [];
     setSprintCompletionTargets(Object.fromEntries(activeCards.map((card) => [card.id, ''])));
     setIsCompletingSprint(true);
@@ -1195,6 +1276,10 @@ function App() {
     event.preventDefault();
     if (!planning.activeSprint) {
       setPlanningMessage('No active sprint to complete.');
+      return;
+    }
+    if (!canManageSelectedTeam) {
+      setPlanningMessage('Team admin access is required to complete sprints.');
       return;
     }
     if (!selectedTeamId) {
@@ -1225,6 +1310,9 @@ function App() {
   }
 
   async function handlePlanningDragEnd(event: DragEndEvent) {
+    if (!canWriteSelectedTeam) {
+      return;
+    }
     if (!event.over) {
       return;
     }
@@ -1243,6 +1331,9 @@ function App() {
   }
 
   async function handleDragEnd(event: DragEndEvent) {
+    if (!canWriteSelectedTeam) {
+      return;
+    }
     if (!board || !event.over) {
       return;
     }
@@ -1291,6 +1382,10 @@ function App() {
   }
 
   function showView(view: View) {
+    if (view === 'settings' && !canUseSettings) {
+      setActiveView('boards');
+      return;
+    }
     setActiveView(view);
     if (view !== 'boards') {
       setIsBoardFullScreen(false);
@@ -1348,7 +1443,7 @@ function App() {
             className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
             type="button"
             onClick={openCreateCard}
-            disabled={!board}
+            disabled={!board || !canWriteSelectedTeam}
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             New Card
@@ -1417,13 +1512,15 @@ function App() {
               collapsed={isNavCollapsed}
               onClick={() => showView('wiki')}
             />
-            <NavButton
-              active={activeView === 'settings'}
-              icon={<Settings className="h-4 w-4" aria-hidden="true" />}
-              label="Settings"
-              collapsed={isNavCollapsed}
-              onClick={() => showView('settings')}
-            />
+            {canUseSettings ? (
+              <NavButton
+                active={activeView === 'settings'}
+                icon={<Settings className="h-4 w-4" aria-hidden="true" />}
+                label="Settings"
+                collapsed={isNavCollapsed}
+                onClick={() => showView('settings')}
+              />
+            ) : null}
           </nav>
         </aside>
         ) : null}
@@ -1595,6 +1692,7 @@ function App() {
                           key={column.id}
                           column={column}
                           selectedCardId={selectedCard?.id ?? ''}
+                          canMoveCards={canWriteSelectedTeam}
                           onSelectCard={selectCard}
                         />
                       ))}
@@ -1648,18 +1746,20 @@ function App() {
                         <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                         Open
                       </button>
-                      <button
-                        className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                        type="button"
-                        onClick={startEditingCard}
-                      >
-                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                        Edit Card
-                      </button>
+                      {canWriteSelectedTeam ? (
+                        <button
+                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                          type="button"
+                          onClick={startEditingCard}
+                        >
+                          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                          Edit Card
+                        </button>
+                      ) : null}
                       <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" />
                     </div>
                   </div>
-                  {isEditingCard ? (
+                  {isEditingCard && canWriteSelectedTeam ? (
                     <form className="space-y-3" onSubmit={updateSelectedCard}>
                       <div>
                         <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="edit-card-title">
@@ -1782,27 +1882,29 @@ function App() {
                     </>
                   )}
 
-                  <form className="mt-5 border-t border-slate-200 pt-4" onSubmit={createComment}>
-                    <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="new-comment">
-                      New comment
-                    </label>
-                    <textarea
-                      id="new-comment"
-                      name="newComment"
-                      className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
-                      value={newComment}
-                      onChange={(event) => setNewComment(event.target.value)}
-                    />
-                    <div className="mt-2 flex justify-end">
-                      <button
-                        className="inline-flex h-8 items-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
-                        type="submit"
-                      >
-                        <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
-                        Add comment
-                      </button>
-                    </div>
-                  </form>
+                  {canWriteSelectedTeam ? (
+                    <form className="mt-5 border-t border-slate-200 pt-4" onSubmit={createComment}>
+                      <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="new-comment">
+                        New comment
+                      </label>
+                      <textarea
+                        id="new-comment"
+                        name="newComment"
+                        className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                        value={newComment}
+                        onChange={(event) => setNewComment(event.target.value)}
+                      />
+                      <div className="mt-2 flex justify-end">
+                        <button
+                          className="inline-flex h-8 items-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
+                          type="submit"
+                        >
+                          <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                          Add comment
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
 
                   <div className="mt-4 space-y-3">
                     <div>
@@ -1840,14 +1942,16 @@ function App() {
               <aside aria-label="Wiki pages">
                 <div className="mb-2 flex items-center justify-between">
                   <h2 className="text-sm font-semibold">Wiki pages</h2>
-                  <button
-                    className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100"
-                    type="button"
-                    aria-label="Add page"
-                    onClick={startCreatingWikiPage}
-                  >
-                    <Plus className="mx-auto h-4 w-4" aria-hidden="true" />
-                  </button>
+                  {canWriteSelectedTeam ? (
+                    <button
+                      className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100"
+                      type="button"
+                      aria-label="Add page"
+                      onClick={startCreatingWikiPage}
+                    >
+                      <Plus className="mx-auto h-4 w-4" aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </div>
                 <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
               </aside>
@@ -1879,16 +1983,18 @@ function App() {
                           <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Card detail</p>
                           <h1 className="mt-1 text-2xl font-semibold tracking-normal">{selectedCard.title}</h1>
                         </div>
-                        <button
-                          className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                          type="button"
-                          onClick={startEditingCard}
-                        >
-                          <Pencil className="h-4 w-4" aria-hidden="true" />
-                          Edit Card
-                        </button>
+                        {canWriteSelectedTeam ? (
+                          <button
+                            className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                            type="button"
+                            onClick={startEditingCard}
+                          >
+                            <Pencil className="h-4 w-4" aria-hidden="true" />
+                            Edit Card
+                          </button>
+                        ) : null}
                       </div>
-                      {isEditingCard ? (
+                      {isEditingCard && canWriteSelectedTeam ? (
                         <form className="mt-4 space-y-3 border-t border-slate-200 pt-4" onSubmit={updateSelectedCard}>
                           <div>
                             <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="page-card-title">
@@ -2115,6 +2221,8 @@ function App() {
                                 <PlanningSprintLane
                                   key={plan.sprint.id}
                                   plan={plan}
+                                  canManage={canManageSelectedTeam}
+                                  canMoveCards={canWriteSelectedTeam}
                                   onStart={startPlanningSprint}
                                   onComplete={beginPlanningSprintCompletion}
                                 />
@@ -2128,7 +2236,7 @@ function App() {
                         )}
                       </section>
 
-                      {planning.activeSprint && isCompletingSprint ? (
+                      {planning.activeSprint && isCompletingSprint && canManageSelectedTeam ? (
                         <form className="space-y-3 rounded-md border border-emerald-100 bg-emerald-50 p-4" onSubmit={completePlanningSprint}>
                           <div>
                             <h2 className="text-sm font-semibold text-emerald-950">Complete sprint</h2>
@@ -2189,7 +2297,7 @@ function App() {
                         </div>
                         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
                           {planning.backlog.length ? (
-                            planning.backlog.map((card) => <PlanningCardRow key={card.id} card={card} />)
+                            planning.backlog.map((card) => <PlanningCardRow key={card.id} card={card} canMove={canWriteSelectedTeam} />)
                           ) : (
                             <p className="rounded-md border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">
                               Backlog is clear. New unassigned team cards will appear here.
@@ -2200,66 +2308,72 @@ function App() {
                     </div>
 
                     <aside className="space-y-4" aria-label="Sprint controls">
-                      <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
-                        <h2 className="text-sm font-semibold">Create sprint</h2>
-                        <div className="mt-3 space-y-3">
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
-                              Sprint name
-                            </label>
-                            <input
-                              id="sprint-name"
-                              className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                              value={sprintForm.name}
-                              onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
-                            />
-                          </div>
-                          <div>
-                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-goal">
-                              Sprint goal
-                            </label>
-                            <textarea
-                              id="sprint-goal"
-                              className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
-                              value={sprintForm.goal}
-                              onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
+                      {canManageSelectedTeam ? (
+                        <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
+                          <h2 className="text-sm font-semibold">Create sprint</h2>
+                          <div className="mt-3 space-y-3">
                             <div>
-                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
-                                Starts on
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
+                                Sprint name
                               </label>
                               <input
-                                id="sprint-starts-on"
-                                type="date"
+                                id="sprint-name"
                                 className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                                value={sprintForm.startsOn}
-                                onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
+                                value={sprintForm.name}
+                                onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
                               />
                             </div>
                             <div>
-                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
-                                Ends on
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-goal">
+                                Sprint goal
                               </label>
-                              <input
-                                id="sprint-ends-on"
-                                type="date"
-                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                                value={sprintForm.endsOn}
-                                onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
+                              <textarea
+                                id="sprint-goal"
+                                className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                                value={sprintForm.goal}
+                                onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
                               />
                             </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
+                                  Starts on
+                                </label>
+                                <input
+                                  id="sprint-starts-on"
+                                  type="date"
+                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                  value={sprintForm.startsOn}
+                                  onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
+                                />
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
+                                  Ends on
+                                </label>
+                                <input
+                                  id="sprint-ends-on"
+                                  type="date"
+                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                  value={sprintForm.endsOn}
+                                  onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
+                                />
+                              </div>
+                            </div>
+                            <button
+                              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                              type="submit"
+                            >
+                              <Plus className="h-4 w-4" aria-hidden="true" />
+                              Create sprint
+                            </button>
                           </div>
-                          <button
-                            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
-                            type="submit"
-                          >
-                            <Plus className="h-4 w-4" aria-hidden="true" />
-                            Create sprint
-                          </button>
-                        </div>
-                      </form>
+                        </form>
+                      ) : (
+                        <p className="rounded-md border border-slate-200 bg-white px-3 py-3 text-sm text-slate-600">
+                          Team admin access is required to create, start, or complete sprints.
+                        </p>
+                      )}
 
                       <section className="rounded-md border border-slate-200 bg-white p-4" aria-label="Team planning boards">
                         <div className="mb-3 flex items-center justify-between">
@@ -2292,19 +2406,21 @@ function App() {
                     <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Workspace knowledge</p>
                     <h1 className="text-2xl font-semibold tracking-normal">Wiki pages</h1>
                   </div>
-                  <button
-                    className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
-                    type="button"
-                    onClick={startCreatingWikiPage}
-                  >
-                    <FilePlus2 className="h-4 w-4" aria-hidden="true" />
-                    New wiki page
-                  </button>
+                  {canWriteSelectedTeam ? (
+                    <button
+                      className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                      type="button"
+                      onClick={startCreatingWikiPage}
+                    >
+                      <FilePlus2 className="h-4 w-4" aria-hidden="true" />
+                      New wiki page
+                    </button>
+                  ) : null}
                 </div>
                 <div className="grid gap-3 md:grid-cols-[16rem_minmax(0,1fr)]">
                   <WikiPageTree pages={filteredWikiPages} selectedPageId={selectedWikiPage?.id} onSelect={loadWikiPage} />
                   <div className="rounded-md border border-slate-200 bg-white p-4">
-                    {selectedWikiPage || isCreatingWikiPage ? (
+                    {(selectedWikiPage || isCreatingWikiPage) && canWriteSelectedTeam ? (
                       <form className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" onSubmit={submitWikiPage}>
                         <div className="space-y-3">
                           <div>
@@ -2345,6 +2461,10 @@ function App() {
                           <MarkdownPreview markdown={wikiForm.bodyMarkdown} />
                         </article>
                       </form>
+                    ) : selectedWikiPage ? (
+                      <article className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-4" aria-label="Markdown preview">
+                        <MarkdownPreview markdown={selectedWikiPage.bodyMarkdown} />
+                      </article>
                     ) : (
                       <article className="text-sm leading-6 text-slate-600">
                         <h2 className="text-lg font-semibold text-slate-950">Select a page</h2>
@@ -2518,7 +2638,7 @@ function App() {
                       <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boardOptions.length} boards</p>
                     </div>
 
-                    {currentUser?.isAdmin ? (
+                    {canManageSelectedTeam ? (
                       <div className="space-y-4">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
                           <div className="min-w-56">
@@ -2545,7 +2665,11 @@ function App() {
                           <button
                             className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
                             type="button"
-                            onClick={() => setIsCreateBoardOpen(true)}
+                            onClick={() => {
+                              if (canManageSelectedTeam) {
+                                setIsCreateBoardOpen(true);
+                              }
+                            }}
                           >
                             <Plus className="h-4 w-4" aria-hidden="true" />
                             New Board
@@ -2554,8 +2678,12 @@ function App() {
                             className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
                             type="button"
                             aria-label="Open add column"
-                            onClick={() => setIsCreateColumnOpen(true)}
-                            disabled={!board}
+                            onClick={() => {
+                              if (canManageSelectedTeam) {
+                                setIsCreateColumnOpen(true);
+                              }
+                            }}
+                            disabled={!board || !canManageSelectedTeam}
                           >
                             <Plus className="h-4 w-4" aria-hidden="true" />
                             Add Column
@@ -2593,7 +2721,7 @@ function App() {
                       </div>
                     ) : (
                       <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                        Admin access is required to manage board structure.
+                        Team admin access is required to manage board structure.
                       </p>
                     )}
                   </div>
@@ -2740,7 +2868,7 @@ function App() {
         )}
       </div>
 
-      {isCreateBoardOpen ? (
+      {isCreateBoardOpen && canManageSelectedTeam ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
           <form
             className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
@@ -2805,7 +2933,7 @@ function App() {
         </div>
       ) : null}
 
-      {isCreateColumnOpen ? (
+      {isCreateColumnOpen && canManageSelectedTeam ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
           <form
             className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
@@ -2849,7 +2977,7 @@ function App() {
         </div>
       ) : null}
 
-      {renamingColumn ? (
+      {renamingColumn && canManageSelectedTeam ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
           <form
             className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
@@ -2896,7 +3024,7 @@ function App() {
         </div>
       ) : null}
 
-      {isCreateOpen ? (
+      {isCreateOpen && canWriteSelectedTeam ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
           <form
             className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
@@ -3071,10 +3199,12 @@ function LoginScreen({
 function KanbanColumn({
   column,
   selectedCardId,
+  canMoveCards,
   onSelectCard,
 }: {
   column: Column;
   selectedCardId: string;
+  canMoveCards: boolean;
   onSelectCard: (cardId: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
@@ -3103,6 +3233,7 @@ function KanbanColumn({
                 key={card.id}
                 card={card}
                 selected={selectedCardId === card.id}
+                canMove={canMoveCards}
                 onSelectCard={onSelectCard}
               />
             ))
@@ -3118,15 +3249,18 @@ function KanbanColumn({
 function SortableCard({
   card,
   selected,
+  canMove,
   onSelectCard,
 }: {
   card: Card;
   selected: boolean;
+  canMove: boolean;
   onSelectCard: (cardId: string) => void;
 }) {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
     id: card.id,
     data: { type: 'card', card },
+    disabled: !canMove,
   });
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -3143,12 +3277,14 @@ function SortableCard({
       style={style}
     >
       <button
-        className="block w-full cursor-grab rounded-md p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-slate-950 active:cursor-grabbing"
+        className={`block w-full rounded-md p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-slate-950 ${
+          canMove ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+        }`}
         type="button"
         aria-label={`View card ${card.title}`}
         onClick={() => onSelectCard(card.id)}
-        {...attributes}
-        {...listeners}
+        {...(canMove ? attributes : {})}
+        {...(canMove ? listeners : {})}
       >
         <span className="mb-3 block">
           <span className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</span>
@@ -3216,8 +3352,8 @@ function PlanningDropZone({ id, label, className, children }: { id: string; labe
   );
 }
 
-function PlanningCardRow({ card }: { card: Card }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: planningCardDragId(card.id) });
+function PlanningCardRow({ card, canMove }: { card: Card; canMove: boolean }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: planningCardDragId(card.id), disabled: !canMove });
   const style = {
     transform: CSS.Translate.toString(transform),
     opacity: isDragging ? 0.65 : 1,
@@ -3227,10 +3363,12 @@ function PlanningCardRow({ card }: { card: Card }) {
     <article
       ref={setNodeRef}
       style={style}
-      className={`rounded-md border border-slate-200 bg-white p-3 shadow-sm ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+      className={`rounded-md border border-slate-200 bg-white p-3 shadow-sm ${
+        canMove ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'
+      }`}
       aria-label={`Planning card ${card.title}`}
-      {...listeners}
-      {...attributes}
+      {...(canMove ? listeners : {})}
+      {...(canMove ? attributes : {})}
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-1.5">
@@ -3265,10 +3403,14 @@ function PlanningCardRow({ card }: { card: Card }) {
 
 function PlanningSprintLane({
   plan,
+  canManage,
+  canMoveCards,
   onStart,
   onComplete,
 }: {
   plan: SprintPlan;
+  canManage: boolean;
+  canMoveCards: boolean;
   onStart?: (sprint: Sprint) => void;
   onComplete?: (sprint: Sprint) => void;
 }) {
@@ -3300,7 +3442,7 @@ function PlanningSprintLane({
 
       {plan.cards.length ? (
         <div className="mt-3 flex-1 space-y-2">
-          {plan.cards.map((card) => <PlanningCardRow key={card.id} card={card} />)}
+          {plan.cards.map((card) => <PlanningCardRow key={card.id} card={card} canMove={canMoveCards} />)}
         </div>
       ) : (
         <p className="mt-3 flex flex-1 items-center justify-center rounded-md border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-500">
@@ -3308,7 +3450,7 @@ function PlanningSprintLane({
         </p>
       )}
 
-      {plan.sprint.status === 'planned' ? (
+      {plan.sprint.status === 'planned' && canManage ? (
         <button
           className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
           type="button"
@@ -3320,7 +3462,7 @@ function PlanningSprintLane({
         </button>
       ) : null}
 
-      {plan.sprint.status === 'active' ? (
+      {plan.sprint.status === 'active' && canManage ? (
         <button
           className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-xs font-medium text-white hover:bg-emerald-800"
           type="button"
@@ -3598,7 +3740,7 @@ export function sprintWindow(sprint: Sprint) {
   return 'Dates not set';
 }
 
-function selectedCardIdForBoard(currentCardId: string, board: Board) {
+export function selectedCardIdForBoard(currentCardId: string, board: Board) {
   if (currentCardId && findCard(board, currentCardId)) {
     return currentCardId;
   }
@@ -3702,7 +3844,43 @@ function displayWorkspaceRole(role: WorkspaceRole) {
   }
 }
 
-function addCardToBoard(board: Board | null, card: Card): Board | null {
+export function teamRoleForUser(team: Team | null, currentUser: CurrentUser | null): WorkspaceRole | '' {
+  if (!currentUser) {
+    return '';
+  }
+  if (currentUser.isAdmin) {
+    return 'owner';
+  }
+  return team?.members.find((member) => member.userId === currentUser.id)?.role ?? '';
+}
+
+export function canReadTeam(team: Team | null, currentUser: CurrentUser | null) {
+  return teamRoleRank(teamRoleForUser(team, currentUser)) >= 1;
+}
+
+export function canWriteTeam(team: Team | null, currentUser: CurrentUser | null) {
+  return teamRoleRank(teamRoleForUser(team, currentUser)) >= 2;
+}
+
+export function canManageTeam(team: Team | null, currentUser: CurrentUser | null) {
+  return teamRoleRank(teamRoleForUser(team, currentUser)) >= 3;
+}
+
+function teamRoleRank(role: WorkspaceRole | '') {
+  switch (role) {
+    case 'owner':
+    case 'admin':
+      return 3;
+    case 'member':
+      return 2;
+    case 'viewer':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+export function addCardToBoard(board: Board | null, card: Card): Board | null {
   if (!board) {
     return board;
   }
@@ -3721,7 +3899,7 @@ function addCardToBoard(board: Board | null, card: Card): Board | null {
   });
 }
 
-function replaceCardInBoard(board: Board | null, card: Card): Board | null {
+export function replaceCardInBoard(board: Board | null, card: Card): Board | null {
   if (!board) {
     return board;
   }
@@ -3736,7 +3914,7 @@ function replaceCardInBoard(board: Board | null, card: Card): Board | null {
   });
 }
 
-function upsertWikiPageInBoard(board: Board | null, page: WikiPage): Board | null {
+export function upsertWikiPageInBoard(board: Board | null, page: WikiPage): Board | null {
   if (!board) {
     return board;
   }
@@ -3812,7 +3990,7 @@ function findCard(board: Board, cardId: string) {
   return board.columns.flatMap((column) => column.cards).find((card) => card.id === cardId);
 }
 
-function findPlanningCard(dashboard: PlanningDashboard, cardId: string) {
+export function findPlanningCard(dashboard: PlanningDashboard, cardId: string) {
   const cards = [
     ...dashboard.backlog,
     ...(dashboard.activeSprint?.cards ?? []),
