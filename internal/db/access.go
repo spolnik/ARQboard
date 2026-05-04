@@ -184,6 +184,28 @@ func (store AccessStore) AuthorizeWikiPage(ctx context.Context, user User, pageI
 	return store.AuthorizeTeam(ctx, user, teamID, level)
 }
 
+func (store AccessStore) AuthorizeEpic(ctx context.Context, user User, epicID string, level AccessLevel) error {
+	teamID, err := store.resourceTeamID(ctx, "SELECT team_id FROM epics WHERE id = %s", epicID)
+	if err != nil {
+		return err
+	}
+	return store.AuthorizeTeam(ctx, user, teamID, level)
+}
+
+func (store AccessStore) AuthorizeCardDependency(ctx context.Context, user User, dependencyID string, level AccessLevel) error {
+	teamID, err := store.resourceTeamID(ctx, `
+		SELECT boards.team_id
+		FROM card_dependencies
+		JOIN cards ON cards.id = card_dependencies.blocked_card_id
+		JOIN boards ON boards.id = cards.board_id
+		WHERE card_dependencies.id = %s
+	`, dependencyID)
+	if err != nil {
+		return err
+	}
+	return store.AuthorizeTeam(ctx, user, teamID, level)
+}
+
 func (store AccessStore) database() (*sql.DB, Driver, error) {
 	if store.Conn == nil || store.Conn.SQL == nil {
 		return nil, DriverUnknown, ErrDatabaseUnavailable

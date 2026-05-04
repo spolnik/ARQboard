@@ -83,7 +83,10 @@ func (store TeamStore) ListTeams(ctx context.Context) ([]Team, error) {
 	if err := ensureAdminWorkspaceMembers(ctx, tx, driver, workspaceID); err != nil {
 		return nil, err
 	}
-	if _, err := ensureDefaultTeam(ctx, tx, driver, workspaceID); err != nil {
+	if _, err := ensureDefaultBoard(ctx, tx, driver); err != nil {
+		return nil, err
+	}
+	if err := ensureBoardsForTeams(ctx, tx, driver, workspaceID); err != nil {
 		return nil, err
 	}
 	teams, err := listTeams(ctx, tx, driver, workspaceID)
@@ -120,29 +123,14 @@ func (store TeamStore) CreateTeam(ctx context.Context, params CreateTeamParams) 
 	if err := ensureAdminWorkspaceMembers(ctx, tx, driver, workspaceID); err != nil {
 		return Team{}, err
 	}
-	teamID, err := newID()
+	teamID, err := createTeamRecord(ctx, tx, driver, workspaceID, name, true)
 	if err != nil {
 		return Team{}, err
 	}
-	slug, err := uniqueTeamSlug(ctx, tx, driver, workspaceID, slugify(name))
-	if err != nil {
+	if _, err := ensureBoardForTeam(ctx, tx, driver, teamID); err != nil {
 		return Team{}, err
 	}
-	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO teams (id, workspace_id, name, slug)
-		VALUES (%s, %s, %s, %s)
-	`,
-		placeholder(driver, 1),
-		placeholder(driver, 2),
-		placeholder(driver, 3),
-		placeholder(driver, 4),
-	), teamID, workspaceID, name, slug)
-	if err != nil {
-		return Team{}, err
-	}
-	if err := seedTeamManagersFromWorkspace(ctx, tx, driver, workspaceID, teamID); err != nil {
-		return Team{}, err
-	}
+
 	team, err := loadTeam(ctx, tx, driver, teamID)
 	if err != nil {
 		return Team{}, err
@@ -397,6 +385,41 @@ func (store TeamStore) CreateWorkspaceMember(ctx context.Context, params CreateW
 	return member, nil
 }
 
+func createTeamRecord(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, name string, seedManagers bool) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("%w: team name is required", ErrValidation)
+	}
+	teamID, err := newID()
+	if err != nil {
+		return "", err
+	}
+	slug, err := uniqueTeamSlug(ctx, q, driver, workspaceID, slugify(name))
+	if err != nil {
+		return "", err
+	}
+	_, err = q.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO teams (id, workspace_id, name, slug)
+		VALUES (%s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+	), teamID, workspaceID, name, slug)
+	if err != nil {
+		return "", err
+	}
+	if seedManagers {
+		if err := seedTeamManagersFromWorkspace(ctx, q, driver, workspaceID, teamID); err != nil {
+			return "", err
+		}
+	} else if err := seedTeamMembersFromWorkspace(ctx, q, driver, workspaceID, teamID); err != nil {
+		return "", err
+	}
+	return teamID, nil
+}
+
 func (store TeamStore) UpdateWorkspaceMember(ctx context.Context, params UpdateWorkspaceMemberParams) (WorkspaceMember, error) {
 	memberID := strings.TrimSpace(params.MemberID)
 	if memberID == "" {
@@ -572,17 +595,6 @@ func scanWorkspaceMember(scanner cardScanner) (WorkspaceMember, error) {
 }
 
 func ensureDefaultTeam(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string) (string, error) {
-	teamID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
-		SELECT id
-		FROM teams
-		WHERE workspace_id = %s
-		ORDER BY created_at, id
-		LIMIT 1
-	`, placeholder(driver, 1)), workspaceID)
-	if err != nil || found {
-		return teamID, err
-	}
-
 	var name string
 	var slug string
 	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
@@ -592,6 +604,17 @@ func ensureDefaultTeam(ctx context.Context, q sqlQueryer, driver Driver, workspa
 	`, placeholder(driver, 1)), workspaceID).Scan(&name, &slug); err != nil {
 		return "", err
 	}
+
+	teamID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
+		SELECT id
+		FROM teams
+		WHERE workspace_id = %s AND slug = %s
+		LIMIT 1
+	`, placeholder(driver, 1), placeholder(driver, 2)), workspaceID, slug)
+	if err != nil || found {
+		return teamID, err
+	}
+
 	teamID, err = newID()
 	if err != nil {
 		return "", err

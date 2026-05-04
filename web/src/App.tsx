@@ -24,9 +24,12 @@ import {
   ExternalLink,
   FilePlus2,
   Folder,
+  GitBranch,
   LayoutDashboard,
+  Link2,
   LogIn,
   LogOut,
+  Map as MapIcon,
   Maximize2,
   MessageSquare,
   Minimize2,
@@ -41,6 +44,7 @@ import {
   Settings,
   SignalHigh,
   SignalLow,
+  Trash2,
   UserRound,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -48,7 +52,7 @@ import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, MouseEvent, ReactNode } from 'react';
 
-type View = 'boards' | 'planning' | 'wiki' | 'settings' | 'card';
+type View = 'boards' | 'roadmap' | 'planning' | 'wiki' | 'settings' | 'card';
 
 type AuthState = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -97,6 +101,7 @@ type Card = {
   boardId: string;
   boardName?: string;
   sprintId?: string;
+  epicId?: string;
   title: string;
   owner: string;
   assigneeId: string;
@@ -231,11 +236,63 @@ type PlanningDashboard = {
   completedSprints: SprintPlan[];
 };
 
+type Epic = {
+  id: string;
+  workspaceId: string;
+  teamId: string;
+  title: string;
+  slug: string;
+  description: string;
+  status: 'planned' | 'active' | 'done';
+  startsOn?: string;
+  targetOn?: string;
+};
+
+type RoadmapCard = {
+  card: Card;
+  columnTitle: string;
+  blockedBy: CardDependency[];
+  blocking: CardDependency[];
+};
+
+type RoadmapEpic = {
+  epic: Epic;
+  cards: RoadmapCard[];
+  totalCards: number;
+  completedCards: number;
+  blockedCards: number;
+  progress: number;
+  risk: string;
+};
+
+type RoadmapDashboard = {
+  teamId: string;
+  teamName: string;
+  epics: RoadmapEpic[];
+  unassignedCards: RoadmapCard[];
+  dependencies: CardDependency[];
+};
+
+type CardDependency = {
+  id: string;
+  blockedCardId: string;
+  blockedTitle: string;
+  blockerCardId: string;
+  blockerTitle: string;
+  relationType: string;
+};
+
 type SprintForm = {
-  name: string;
   goal: string;
+  week: string;
+};
+
+type EpicForm = {
+  title: string;
+  description: string;
+  status: Epic['status'];
   startsOn: string;
-  endsOn: string;
+  targetOn: string;
 };
 
 type WikiTreeNode = {
@@ -247,6 +304,9 @@ type WikiTreeNode = {
 
 const workspaceRoleOptions: WorkspaceRole[] = ['owner', 'admin', 'member', 'viewer'];
 const emptyPlanningDashboard: PlanningDashboard = { boardId: '', teamId: '', teamName: '', boards: [], backlog: [], plannedSprints: [], completedSprints: [] };
+const emptyRoadmapDashboard: RoadmapDashboard = { teamId: '', teamName: '', epics: [], unassignedCards: [], dependencies: [] };
+const emptyEpicForm: EpicForm = { title: '', description: '', status: 'planned', startsOn: '', targetOn: '' };
+const defaultSprintForm = (): SprintForm => ({ goal: '', week: currentSprintWeekInput() });
 const emptyBoardFilters: BoardFilters = { assigneeId: 'all', labelId: 'all', priority: 'all', dueStatus: 'all' };
 const boardCollisionDetection: CollisionDetection = (args) => {
   const withoutActive = (collisions: ReturnType<CollisionDetection>) => collisions.filter((collision) => collision.id !== args.active.id);
@@ -298,12 +358,8 @@ function App() {
   const [newCardTitle, setNewCardTitle] = useState('');
   const [newCardAssigneeId, setNewCardAssigneeId] = useState('');
   const [newCardLabels, setNewCardLabels] = useState('');
-  const [isCreateBoardOpen, setIsCreateBoardOpen] = useState(false);
-  const [newBoardName, setNewBoardName] = useState('');
   const [isCreateColumnOpen, setIsCreateColumnOpen] = useState(false);
   const [newColumnTitle, setNewColumnTitle] = useState('');
-  const [renamingColumn, setRenamingColumn] = useState<Column | null>(null);
-  const [columnTitle, setColumnTitle] = useState('');
   const [selectedWikiPage, setSelectedWikiPage] = useState<WikiPage | null>(null);
   const [isCreatingWikiPage, setIsCreatingWikiPage] = useState(false);
   const [wikiForm, setWikiForm] = useState<WikiForm>({ title: '', bodyMarkdown: '' });
@@ -317,10 +373,14 @@ function App() {
   const [memberMessage, setMemberMessage] = useState('');
   const [isSavingMember, setIsSavingMember] = useState(false);
   const [planningDashboard, setPlanningDashboard] = useState<PlanningDashboard | null>(null);
-  const [sprintForm, setSprintForm] = useState<SprintForm>({ name: '', goal: '', startsOn: '', endsOn: '' });
+  const [sprintForm, setSprintForm] = useState<SprintForm>(defaultSprintForm);
   const [isCompletingSprint, setIsCompletingSprint] = useState(false);
   const [sprintCompletionTargets, setSprintCompletionTargets] = useState<Record<string, string>>({});
   const [planningMessage, setPlanningMessage] = useState('');
+  const [roadmapDashboard, setRoadmapDashboard] = useState<RoadmapDashboard | null>(null);
+  const [epicForm, setEpicForm] = useState<EpicForm>(emptyEpicForm);
+  const [dependencyDrafts, setDependencyDrafts] = useState<Record<string, string>>({});
+  const [roadmapMessage, setRoadmapMessage] = useState('');
   const [newComment, setNewComment] = useState('');
   const [error, setError] = useState('');
 
@@ -339,12 +399,8 @@ function App() {
     setTeamMemberForm({ userId: '', role: 'member' });
     setTeamMessage('');
     setIsCreateOpen(false);
-    setIsCreateBoardOpen(false);
-    setNewBoardName('');
     setIsCreateColumnOpen(false);
     setNewColumnTitle('');
-    setRenamingColumn(null);
-    setColumnTitle('');
     setSelectedWikiPage(null);
     setIsCreatingWikiPage(false);
     setWorkspaceMembers([]);
@@ -352,10 +408,14 @@ function App() {
     setMemberMessage('');
     setIsSavingMember(false);
     setPlanningDashboard(null);
-    setSprintForm({ name: '', goal: '', startsOn: '', endsOn: '' });
+    setSprintForm(defaultSprintForm());
     setIsCompletingSprint(false);
     setSprintCompletionTargets({});
     setPlanningMessage('');
+    setRoadmapDashboard(null);
+    setEpicForm(emptyEpicForm);
+    setDependencyDrafts({});
+    setRoadmapMessage('');
     setNewComment('');
     setBoardFilters(emptyBoardFilters);
     setNewCardAssigneeId('');
@@ -617,6 +677,34 @@ function App() {
     };
   }, [activeView, authState, selectedTeamId]);
 
+  useEffect(() => {
+    if (authState !== 'authenticated' || activeView !== 'roadmap' || !selectedTeamId) {
+      return;
+    }
+
+    let cancelled = false;
+    async function loadRoadmap() {
+      try {
+        const dashboard = normalizeRoadmapDashboard(await getJSON<RoadmapDashboard>(roadmapDashboardURL(selectedTeamId)));
+        if (!cancelled) {
+          setRoadmapDashboard(dashboard);
+          setDependencyDrafts({});
+          setRoadmapMessage('');
+        }
+      } catch {
+        if (!cancelled) {
+          setRoadmapDashboard(emptyRoadmapDashboard);
+          setRoadmapMessage('Could not load roadmap dashboard.');
+        }
+      }
+    }
+
+    loadRoadmap();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, authState, selectedTeamId]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const allCards = useMemo(() => board?.columns.flatMap((column) => column.cards) ?? [], [board]);
   const boardSelectedCard = selectedCardId ? allCards.find((card) => card.id === selectedCardId) : undefined;
@@ -625,6 +713,7 @@ function App() {
   const rightRailAttached = activeView === 'boards' && !boardFullScreen;
   const rightRailVisible = rightRailAttached && !isRightRailCollapsed;
   const planning = planningDashboard ?? emptyPlanningDashboard;
+  const roadmap = roadmapDashboard ?? emptyRoadmapDashboard;
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
   const canWriteSelectedTeam = canWriteTeam(selectedTeam, currentUser);
   const canManageSelectedTeam = canManageTeam(selectedTeam, currentUser);
@@ -635,6 +724,7 @@ function App() {
     ...(planning.activeSprint ? [planning.activeSprint] : []),
     ...planning.plannedSprints,
   ].sort((left, right) => sprintSortKey(left.sprint).localeCompare(sprintSortKey(right.sprint)) || left.sprint.name.localeCompare(right.sprint.name));
+  const roadmapCards = useMemo(() => roadmapDashboardCards(roadmap), [roadmap]);
   const layoutGridColumns = rightRailAttached
     ? isNavCollapsed
       ? isRightRailCollapsed
@@ -737,46 +827,6 @@ function App() {
     setError('');
   }
 
-  async function createBoard(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const name = newBoardName.trim();
-    if (!name) {
-      return;
-    }
-    if (!selectedTeamId) {
-      setError('Select a team before creating a board.');
-      return;
-    }
-    if (!canManageSelectedTeam) {
-      setError('Team admin access is required to create boards.');
-      return;
-    }
-
-    try {
-      const nextBoard = normalizeBoard(
-        await requestJSON<Board>('/api/boards', {
-          method: 'POST',
-          body: JSON.stringify({ name, teamId: selectedTeamId }),
-        }),
-      );
-      setBoards((current) => upsertBoardSummary(current, nextBoard));
-      setSelectedTeamId(nextBoard.teamId || selectedTeamId);
-      setSelectedBoardId(nextBoard.id);
-      setBoard(nextBoard);
-      setSelectedCardId('');
-      setCardDetail(null);
-      setSelectedWikiPage(null);
-      setIsCreatingWikiPage(false);
-      setNewBoardName('');
-      setIsCreateBoardOpen(false);
-      showView('boards');
-      setError('');
-    } catch {
-      setError('Could not create the board.');
-    }
-  }
-
   async function createTeam(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const name = newTeamName.trim();
@@ -791,12 +841,20 @@ function App() {
           body: JSON.stringify({ name }),
         }),
       );
+      const nextBoards = sortBoardSummaries(await getJSON<BoardSummary[]>('/api/boards'));
+      const teamBoard = nextBoards.find((summary) => summary.teamId === team.id);
       setTeams((current) => sortTeams([...current.filter((candidate) => candidate.id !== team.id), team]));
+      setBoards(nextBoards);
       setSelectedTeamId(team.id);
+      if (teamBoard) {
+        selectBoard(teamBoard.id);
+      }
       setNewTeamName('');
       setPlanningDashboard(null);
+      setRoadmapDashboard(null);
       setTeamMessage('Team created.');
       setPlanningMessage('Team created.');
+      setRoadmapMessage('Team created.');
       setError('');
     } catch {
       setTeamMessage('Could not create team.');
@@ -857,48 +915,6 @@ function App() {
       setError('');
     } catch {
       setError('Could not add the column.');
-    }
-  }
-
-  function startRenamingColumn(column: Column) {
-    if (!canManageSelectedTeam) {
-      setError('Team admin access is required to rename columns.');
-      return;
-    }
-    setRenamingColumn(column);
-    setColumnTitle(column.title);
-  }
-
-  async function renameColumn(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!renamingColumn) {
-      return;
-    }
-    if (!canManageSelectedTeam) {
-      setError('Team admin access is required to rename columns.');
-      return;
-    }
-
-    const title = columnTitle.trim();
-    if (!title) {
-      return;
-    }
-
-    try {
-      const nextBoard = normalizeBoard(
-        await requestJSON<Board>(`/api/columns/${renamingColumn.id}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ title }),
-        }),
-      );
-      setBoard(nextBoard);
-      setBoards((current) => upsertBoardSummary(current, nextBoard));
-      setSelectedCardId((current) => selectedCardIdForBoard(current, nextBoard));
-      setRenamingColumn(null);
-      setColumnTitle('');
-      setError('');
-    } catch {
-      setError('Could not rename the column.');
     }
   }
 
@@ -1192,23 +1208,18 @@ function App() {
       setPlanningMessage('Team admin access is required to create sprints.');
       return;
     }
-    if (!boardOptions.length) {
-      setPlanningMessage('Create a board for this team before creating a sprint.');
+    const weekRange = sprintWeekRange(sprintForm.week);
+    if (!weekRange) {
+      setPlanningMessage('Choose a valid sprint week.');
       return;
     }
 
     const payload = {
       teamId: selectedTeamId,
-      boardId: boardOptions[0]?.id ?? '',
-      name: sprintForm.name.trim(),
       goal: sprintForm.goal.trim(),
-      startsOn: sprintForm.startsOn.trim(),
-      endsOn: sprintForm.endsOn.trim(),
+      startsOn: weekRange.startsOn,
+      endsOn: weekRange.endsOn,
     };
-    if (!payload.name) {
-      setPlanningMessage('Sprint name is required.');
-      return;
-    }
 
     try {
       const sprint = await requestJSON<Sprint>('/api/sprints', {
@@ -1216,8 +1227,8 @@ function App() {
         body: JSON.stringify(payload),
       });
       setPlanningDashboard((current) => addSprintToDashboard(current ?? emptyPlanningDashboard, sprint));
-      setSprintForm({ name: '', goal: '', startsOn: '', endsOn: '' });
-      setPlanningMessage('Sprint created.');
+      setSprintForm(defaultSprintForm());
+      setPlanningMessage('Weekly sprint created.');
     } catch {
       setPlanningMessage('Could not create sprint.');
     }
@@ -1241,23 +1252,6 @@ function App() {
       setPlanningMessage(sprintId ? 'Card assigned to sprint.' : 'Card moved to backlog.');
     } catch {
       setPlanningMessage('Could not move the card.');
-    }
-  }
-
-  async function startPlanningSprint(sprint: Sprint) {
-    if (!canManageSelectedTeam) {
-      setPlanningMessage('Team admin access is required to start sprints.');
-      return;
-    }
-    try {
-      const startedSprint = await requestJSON<Sprint>(`/api/sprints/${sprint.id}/start`, { method: 'POST' });
-      setPlanningDashboard((current) => startSprintInDashboard(current ?? emptyPlanningDashboard, startedSprint));
-      setBoard(null);
-      setIsCompletingSprint(false);
-      setSprintCompletionTargets({});
-      setPlanningMessage('Sprint started.');
-    } catch {
-      setPlanningMessage('Could not start sprint.');
     }
   }
 
@@ -1309,6 +1303,104 @@ function App() {
     }
   }
 
+  async function submitEpic(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTeamId) {
+      setRoadmapMessage('Select a team before creating an epic.');
+      return;
+    }
+    if (!canWriteSelectedTeam) {
+      setRoadmapMessage('Team write access is required to create epics.');
+      return;
+    }
+
+    const payload = {
+      teamId: selectedTeamId,
+      title: epicForm.title.trim(),
+      description: epicForm.description.trim(),
+      status: epicForm.status,
+      startsOn: epicForm.startsOn.trim(),
+      targetOn: epicForm.targetOn.trim(),
+    };
+    if (!payload.title) {
+      setRoadmapMessage('Epic title is required.');
+      return;
+    }
+
+    try {
+      const epic = await requestJSON<Epic>('/api/epics', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setRoadmapDashboard((current) => upsertEpicInRoadmap(current ?? emptyRoadmapDashboard, epic));
+      setEpicForm(emptyEpicForm);
+      setRoadmapMessage('Epic created.');
+    } catch {
+      setRoadmapMessage('Could not create epic.');
+    }
+  }
+
+  async function assignRoadmapCardToEpic(card: Card, epicId: string) {
+    if (!canWriteSelectedTeam) {
+      setRoadmapMessage('Team write access is required to assign cards to epics.');
+      return;
+    }
+    try {
+      const assignedCard = normalizeCard(
+        await requestJSON<Card>(`/api/cards/${card.id}/epic`, {
+          method: 'PATCH',
+          body: JSON.stringify({ epicId }),
+        }),
+      );
+      setRoadmapDashboard((current) => assignCardInRoadmap(current ?? emptyRoadmapDashboard, assignedCard));
+      setBoard((current) => replaceCardInBoard(current, assignedCard));
+      setCardDetail((current) => (current && current.card.id === assignedCard.id ? { ...current, card: assignedCard } : current));
+      setRoadmapMessage(assignedCard.epicId ? 'Card assigned to epic.' : 'Card moved out of epics.');
+    } catch {
+      setRoadmapMessage('Could not assign the card.');
+    }
+  }
+
+  async function createRoadmapDependency(card: Card) {
+    if (!canWriteSelectedTeam) {
+      setRoadmapMessage('Team write access is required to update dependencies.');
+      return;
+    }
+    const blockerCardId = dependencyDrafts[card.id] ?? '';
+    if (!blockerCardId) {
+      setRoadmapMessage('Choose a blocker card first.');
+      return;
+    }
+    try {
+      const dependency = await requestJSON<CardDependency>(`/api/cards/${card.id}/dependencies`, {
+        method: 'POST',
+        body: JSON.stringify({ blockerCardId }),
+      });
+      setRoadmapDashboard((current) => upsertDependencyInRoadmap(current ?? emptyRoadmapDashboard, dependency, 'add'));
+      setDependencyDrafts((current) => ({ ...current, [card.id]: '' }));
+      setRoadmapMessage('Dependency added.');
+    } catch {
+      setRoadmapMessage('Could not add the dependency.');
+    }
+  }
+
+  async function deleteRoadmapDependency(dependency: CardDependency) {
+    if (!canWriteSelectedTeam) {
+      setRoadmapMessage('Team write access is required to update dependencies.');
+      return;
+    }
+    try {
+      const response = await fetch(`/api/card-dependencies/${dependency.id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      setRoadmapDashboard((current) => upsertDependencyInRoadmap(current ?? emptyRoadmapDashboard, dependency, 'remove'));
+      setRoadmapMessage('Dependency removed.');
+    } catch {
+      setRoadmapMessage('Could not remove the dependency.');
+    }
+  }
+
   async function handlePlanningDragEnd(event: DragEndEvent) {
     if (!canWriteSelectedTeam) {
       return;
@@ -1328,6 +1420,24 @@ function App() {
     }
 
     await movePlanningCard(card, target.sprintId);
+  }
+
+  async function handleRoadmapDragEnd(event: DragEndEvent) {
+    if (!canWriteSelectedTeam || !event.over) {
+      return;
+    }
+
+    const target = resolveRoadmapMoveTarget(String(event.active.id), String(event.over.id));
+    if (!target) {
+      return;
+    }
+
+    const roadmapCard = findRoadmapCard(roadmap, target.cardId);
+    if (!roadmapCard || (roadmapCard.card.epicId ?? '') === target.epicId) {
+      return;
+    }
+
+    await assignRoadmapCardToEpic(roadmapCard.card, target.epicId);
   }
 
   async function handleDragEnd(event: DragEndEvent) {
@@ -1499,6 +1609,13 @@ function App() {
               onClick={() => showView('boards')}
             />
             <NavButton
+              active={activeView === 'roadmap'}
+              icon={<MapIcon className="h-4 w-4" aria-hidden="true" />}
+              label="Roadmap"
+              collapsed={isNavCollapsed}
+              onClick={() => showView('roadmap')}
+            />
+            <NavButton
               active={activeView === 'planning'}
               icon={<CalendarDays className="h-4 w-4" aria-hidden="true" />}
               label="Planning"
@@ -1555,27 +1672,9 @@ function App() {
                       )}
                     </select>
                   </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="board-selector">
-                      Board
-                    </label>
-                    <select
-                      id="board-selector"
-                      className="h-9 min-w-48 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
-                      value={selectedBoardId}
-                      onChange={(event) => selectBoard(event.target.value)}
-                    >
-                      {boardOptions.length > 0 ? (
-                        boardOptions.map((summary) => (
-                          <option key={summary.id} value={summary.id}>
-                            {summary.name}
-                          </option>
-                        ))
-                      ) : (
-                        <option value="">No boards</option>
-                      )}
-                    </select>
-                  </div>
+                  <span className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700">
+                    Team board: {boardOptions[0]?.name ?? board?.name ?? 'No board'}
+                  </span>
                   <button
                     className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
                     type="button"
@@ -2159,6 +2258,277 @@ function App() {
                   </article>
                 )}
               </section>
+            ) : activeView === 'roadmap' ? (
+              <section className="max-w-none" aria-label="Roadmap workspace">
+                <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Product roadmap</p>
+                    <h1 className="text-2xl font-semibold tracking-normal">Roadmap dashboard</h1>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="roadmap-team-selector">
+                        Team
+                      </label>
+                      <select
+                        id="roadmap-team-selector"
+                        className="h-9 min-w-52 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
+                        value={selectedTeamId}
+                        onChange={(event) => setSelectedTeamId(event.target.value)}
+                      >
+                        {teams.length > 0 ? (
+                          teams.map((team) => (
+                            <option key={team.id} value={team.id}>
+                              {team.name}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="">No teams</option>
+                        )}
+                      </select>
+                    </div>
+                    <span className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-600">
+                      <GitBranch className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                      {roadmap.epics.length} {roadmap.epics.length === 1 ? 'epic' : 'epics'}
+                    </span>
+                    <span className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-600">
+                      <Link2 className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                      {roadmap.dependencies.length} {roadmap.dependencies.length === 1 ? 'dependency' : 'dependencies'}
+                    </span>
+                  </div>
+                </div>
+
+                {roadmapMessage ? (
+                  <p className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">{roadmapMessage}</p>
+                ) : null}
+
+                <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleRoadmapDragEnd}>
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_23rem]">
+                    <div className="space-y-4">
+                      <section className="rounded-md border border-slate-200 bg-white p-4" aria-label="Epic roadmap">
+                        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <h2 className="text-sm font-semibold">Epic timeline</h2>
+                            <p className="text-sm text-slate-500">{selectedTeam?.name || roadmap.teamName || 'Selected team'}</p>
+                          </div>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">
+                            {roadmapCards.length} {roadmapCards.length === 1 ? 'card' : 'cards'}
+                          </span>
+                        </div>
+                        {roadmap.epics.length ? (
+                          <div className="overflow-x-auto pb-1">
+                            <div className="grid min-w-[76rem] auto-cols-[minmax(21rem,1fr)] grid-flow-col gap-3">
+                              {roadmap.epics.map((epicPlan) => (
+                                <RoadmapDropZone
+                                  key={epicPlan.epic.id}
+                                  id={roadmapEpicDropId(epicPlan.epic.id)}
+                                  label={`Epic ${epicPlan.epic.title}`}
+                                  className="flex min-h-[28rem] flex-col rounded-md border border-slate-200 bg-slate-50 p-3"
+                                >
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className={`rounded px-2 py-1 text-xs font-medium ${epicStatusClass(epicPlan.epic.status)}`}>
+                                          {epicStatusLabel(epicPlan.epic.status)}
+                                        </span>
+                                        <span className={`rounded px-2 py-1 text-xs font-medium ${roadmapRiskClass(epicPlan.risk)}`}>
+                                          {roadmapRiskLabel(epicPlan.risk)}
+                                        </span>
+                                      </div>
+                                      <h3 className="mt-2 text-sm font-semibold text-slate-950">{epicPlan.epic.title}</h3>
+                                      {epicPlan.epic.description ? <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-500">{epicPlan.epic.description}</p> : null}
+                                      <p className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500">
+                                        <CalendarDays className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                                        {epicWindow(epicPlan.epic)}
+                                      </p>
+                                    </div>
+                                    <span className="shrink-0 rounded bg-white px-2 py-1 text-xs text-slate-500">
+                                      {epicPlan.totalCards} {epicPlan.totalCards === 1 ? 'card' : 'cards'}
+                                    </span>
+                                  </div>
+                                  <div className="mt-3">
+                                    <div className="h-2 rounded-full bg-white">
+                                      <div
+                                        className="h-2 rounded-full bg-emerald-500"
+                                        style={{ width: `${Math.max(0, Math.min(epicPlan.progress, 100))}%` }}
+                                      />
+                                    </div>
+                                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+                                      <span>{epicPlan.progress}% complete</span>
+                                      <span>{epicPlan.completedCards} done</span>
+                                      <span>{epicPlan.blockedCards} blocked</span>
+                                    </div>
+                                  </div>
+                                  <div className="mt-3 flex-1 space-y-2">
+                                    {epicPlan.cards.length ? (
+                                      epicPlan.cards.map((roadmapCard) => (
+                                        <RoadmapCardRow
+                                          key={roadmapCard.card.id}
+                                          roadmapCard={roadmapCard}
+                                          epics={roadmap.epics.map((plan) => plan.epic)}
+                                          allCards={roadmapCards.map((candidate) => candidate.card)}
+                                          canWrite={canWriteSelectedTeam}
+                                          dependencyDraft={dependencyDrafts[roadmapCard.card.id] ?? ''}
+                                          onAssign={assignRoadmapCardToEpic}
+                                          onDependencyDraftChange={(cardId, blockerId) => setDependencyDrafts((current) => ({ ...current, [cardId]: blockerId }))}
+                                          onAddDependency={createRoadmapDependency}
+                                          onRemoveDependency={deleteRoadmapDependency}
+                                        />
+                                      ))
+                                    ) : (
+                                      <p className="flex min-h-28 items-center justify-center rounded-md border border-dashed border-slate-200 bg-white px-3 py-8 text-center text-sm text-slate-500">
+                                        Drop cards here to connect work to this epic.
+                                      </p>
+                                    )}
+                                  </div>
+                                </RoadmapDropZone>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-10 text-center text-sm text-slate-500">
+                            No epics for this team yet.
+                          </p>
+                        )}
+                      </section>
+
+                      <RoadmapDropZone id="roadmap-unassigned" label="Unassigned roadmap backlog" className="rounded-md border border-slate-200 bg-white p-4">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h2 className="text-sm font-semibold">Unassigned roadmap backlog</h2>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{roadmap.unassignedCards.length}</span>
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                          {roadmap.unassignedCards.length ? (
+                            roadmap.unassignedCards.map((roadmapCard) => (
+                              <RoadmapCardRow
+                                key={roadmapCard.card.id}
+                                roadmapCard={roadmapCard}
+                                epics={roadmap.epics.map((plan) => plan.epic)}
+                                allCards={roadmapCards.map((candidate) => candidate.card)}
+                                canWrite={canWriteSelectedTeam}
+                                dependencyDraft={dependencyDrafts[roadmapCard.card.id] ?? ''}
+                                onAssign={assignRoadmapCardToEpic}
+                                onDependencyDraftChange={(cardId, blockerId) => setDependencyDrafts((current) => ({ ...current, [cardId]: blockerId }))}
+                                onAddDependency={createRoadmapDependency}
+                                onRemoveDependency={deleteRoadmapDependency}
+                              />
+                            ))
+                          ) : (
+                            <p className="rounded-md border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">
+                              Every team card is connected to an epic.
+                            </p>
+                          )}
+                        </div>
+                      </RoadmapDropZone>
+                    </div>
+
+                    <aside className="space-y-4" aria-label="Roadmap controls">
+                      {canWriteSelectedTeam ? (
+                        <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitEpic}>
+                          <h2 className="text-sm font-semibold">Create epic</h2>
+                          <div className="mt-3 space-y-3">
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="epic-title">
+                                Epic title
+                              </label>
+                              <input
+                                id="epic-title"
+                                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                value={epicForm.title}
+                                onChange={(event) => setEpicForm((current) => ({ ...current, title: event.target.value }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="epic-description">
+                                Epic description
+                              </label>
+                              <textarea
+                                id="epic-description"
+                                className="min-h-20 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-950"
+                                value={epicForm.description}
+                                onChange={(event) => setEpicForm((current) => ({ ...current, description: event.target.value }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="epic-status">
+                                Epic status
+                              </label>
+                              <select
+                                id="epic-status"
+                                className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-950"
+                                value={epicForm.status}
+                                onChange={(event) => setEpicForm((current) => ({ ...current, status: event.target.value as Epic['status'] }))}
+                              >
+                                <option value="planned">Planned</option>
+                                <option value="active">Active</option>
+                                <option value="done">Done</option>
+                              </select>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="epic-start">
+                                  Epic start
+                                </label>
+                                <input
+                                  id="epic-start"
+                                  type="date"
+                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                  value={epicForm.startsOn}
+                                  onChange={(event) => setEpicForm((current) => ({ ...current, startsOn: event.target.value }))}
+                                />
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="epic-target">
+                                  Epic target
+                                </label>
+                                <input
+                                  id="epic-target"
+                                  type="date"
+                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
+                                  value={epicForm.targetOn}
+                                  onChange={(event) => setEpicForm((current) => ({ ...current, targetOn: event.target.value }))}
+                                />
+                              </div>
+                            </div>
+                            <button
+                              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                              type="submit"
+                            >
+                              <Plus className="h-4 w-4" aria-hidden="true" />
+                              Create epic
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <p className="rounded-md border border-slate-200 bg-white px-3 py-3 text-sm text-slate-600">
+                          Team write access is required to create epics or change dependencies.
+                        </p>
+                      )}
+
+                      <section className="rounded-md border border-slate-200 bg-white p-4" aria-label="Dependency overview">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h2 className="text-sm font-semibold">Dependencies</h2>
+                          <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">{roadmap.dependencies.length}</span>
+                        </div>
+                        {roadmap.dependencies.length ? (
+                          <ul className="space-y-2">
+                            {roadmap.dependencies.map((dependency) => (
+                              <li key={dependency.id} className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+                                <p className="font-medium text-slate-800">{dependency.blockedTitle}</p>
+                                <p className="mt-1 text-xs text-slate-500">Blocked by {dependency.blockerTitle}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+                            No dependencies mapped yet.
+                          </p>
+                        )}
+                      </section>
+                    </aside>
+                  </div>
+                </DndContext>
+              </section>
             ) : activeView === 'planning' ? (
               <section className="max-w-none" aria-label="Planning workspace">
                 <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
@@ -2223,7 +2593,6 @@ function App() {
                                   plan={plan}
                                   canManage={canManageSelectedTeam}
                                   canMoveCards={canWriteSelectedTeam}
-                                  onStart={startPlanningSprint}
                                   onComplete={beginPlanningSprintCompletion}
                                 />
                               ))}
@@ -2310,17 +2679,18 @@ function App() {
                     <aside className="space-y-4" aria-label="Sprint controls">
                       {canManageSelectedTeam ? (
                         <form className="rounded-md border border-slate-200 bg-white p-4" onSubmit={submitSprint}>
-                          <h2 className="text-sm font-semibold">Create sprint</h2>
+                          <h2 className="text-sm font-semibold">Create weekly sprint</h2>
                           <div className="mt-3 space-y-3">
                             <div>
-                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-name">
-                                Sprint name
+                              <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-week">
+                                Sprint week
                               </label>
                               <input
-                                id="sprint-name"
+                                id="sprint-week"
+                                type="week"
                                 className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                                value={sprintForm.name}
-                                onChange={(event) => setSprintForm((current) => ({ ...current, name: event.target.value }))}
+                                value={sprintForm.week}
+                                onChange={(event) => setSprintForm((current) => ({ ...current, week: event.target.value }))}
                               />
                             </div>
                             <div>
@@ -2334,44 +2704,18 @@ function App() {
                                 onChange={(event) => setSprintForm((current) => ({ ...current, goal: event.target.value }))}
                               />
                             </div>
-                            <div className="grid grid-cols-2 gap-2">
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-starts-on">
-                                  Starts on
-                                </label>
-                                <input
-                                  id="sprint-starts-on"
-                                  type="date"
-                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                                  value={sprintForm.startsOn}
-                                  onChange={(event) => setSprintForm((current) => ({ ...current, startsOn: event.target.value }))}
-                                />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="sprint-ends-on">
-                                  Ends on
-                                </label>
-                                <input
-                                  id="sprint-ends-on"
-                                  type="date"
-                                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                                  value={sprintForm.endsOn}
-                                  onChange={(event) => setSprintForm((current) => ({ ...current, endsOn: event.target.value }))}
-                                />
-                              </div>
-                            </div>
                             <button
                               className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
                               type="submit"
                             >
                               <Plus className="h-4 w-4" aria-hidden="true" />
-                              Create sprint
+                              Create weekly sprint
                             </button>
                           </div>
                         </form>
                       ) : (
                         <p className="rounded-md border border-slate-200 bg-white px-3 py-3 text-sm text-slate-600">
-                          Team admin access is required to create, start, or complete sprints.
+                          Team admin access is required to create or complete sprints.
                         </p>
                       )}
 
@@ -2633,47 +2977,17 @@ function App() {
                     <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <h2 className="text-sm font-semibold">Board administration</h2>
-                        <p className="text-sm text-slate-500">Boards, columns, and workflow states.</p>
+                        <p className="text-sm text-slate-500">Team board columns and workflow states.</p>
                       </div>
-                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boardOptions.length} boards</p>
+                      <p className="text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{boardOptions.length} team board</p>
                     </div>
 
                     {canManageSelectedTeam ? (
                       <div className="space-y-4">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                          <div className="min-w-56">
-                            <label className="mb-1 block text-xs font-medium text-slate-700" htmlFor="settings-board-selector">
-                              Board to configure
-                            </label>
-                            <select
-                              id="settings-board-selector"
-                              className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
-                              value={selectedBoardId}
-                              onChange={(event) => selectBoard(event.target.value)}
-                            >
-                              {boardOptions.length > 0 ? (
-                                boardOptions.map((summary) => (
-                                  <option key={summary.id} value={summary.id}>
-                                    {summary.name}
-                                  </option>
-                                ))
-                              ) : (
-                                <option value="">No boards</option>
-                              )}
-                            </select>
-                          </div>
-                          <button
-                            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                            type="button"
-                            onClick={() => {
-                              if (canManageSelectedTeam) {
-                                setIsCreateBoardOpen(true);
-                              }
-                            }}
-                          >
-                            <Plus className="h-4 w-4" aria-hidden="true" />
-                            New Board
-                          </button>
+                          <span className="inline-flex h-9 min-w-56 items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700">
+                            Team board: {boardOptions[0]?.name ?? board?.name ?? 'No board'}
+                          </span>
                           <button
                             className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
                             type="button"
@@ -2702,15 +3016,7 @@ function App() {
                                     <p className="truncate text-sm font-medium text-slate-900">{column.title}</p>
                                     <p className="text-xs text-slate-500">{column.cards.length} cards</p>
                                   </div>
-                                  <button
-                                    className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                                    type="button"
-                                    aria-label={`Rename ${column.title}`}
-                                    onClick={() => startRenamingColumn(column)}
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                                    Rename
-                                  </button>
+                                  <span className="text-xs text-slate-400">Fixed name</span>
                                 </div>
                               ))}
                             </div>
@@ -2868,71 +3174,6 @@ function App() {
         )}
       </div>
 
-      {isCreateBoardOpen && canManageSelectedTeam ? (
-        <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
-          <form
-            className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-board-title"
-            onSubmit={createBoard}
-          >
-            <div className="mb-4">
-              <h2 id="create-board-title" className="text-lg font-semibold">
-                Create Board
-              </h2>
-              <p className="text-sm text-slate-500">Start a new persisted board in this workspace.</p>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="board-name">
-                Board name
-              </label>
-              <input
-                id="board-name"
-                name="name"
-                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                value={newBoardName}
-                onChange={(event) => setNewBoardName(event.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="mt-3">
-              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="board-team">
-                Team
-              </label>
-              <select
-                id="board-team"
-                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-950"
-                value={selectedTeamId}
-                onChange={(event) => setSelectedTeamId(event.target.value)}
-              >
-                {teams.length > 0 ? (
-                  teams.map((team) => (
-                    <option key={team.id} value={team.id}>
-                      {team.name}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No teams</option>
-                )}
-              </select>
-            </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                type="button"
-                onClick={() => setIsCreateBoardOpen(false)}
-              >
-                Cancel
-              </button>
-              <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
-                Create Board
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : null}
-
       {isCreateColumnOpen && canManageSelectedTeam ? (
         <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
           <form
@@ -2971,53 +3212,6 @@ function App() {
               </button>
               <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
                 Add column
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : null}
-
-      {renamingColumn && canManageSelectedTeam ? (
-        <div className="fixed inset-0 z-10 flex items-start justify-center bg-slate-950/20 px-4 py-16">
-          <form
-            className="w-full max-w-md rounded-md border border-slate-200 bg-white p-4 shadow-lg"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="rename-column-title"
-            onSubmit={renameColumn}
-          >
-            <div className="mb-4">
-              <h2 id="rename-column-title" className="text-lg font-semibold">
-                Rename Column
-              </h2>
-              <p className="text-sm text-slate-500">Update this board column title.</p>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700" htmlFor="rename-column-input">
-                Column title
-              </label>
-              <input
-                id="rename-column-input"
-                name="title"
-                className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-slate-950"
-                value={columnTitle}
-                onChange={(event) => setColumnTitle(event.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                className="h-9 rounded-md border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                type="button"
-                onClick={() => {
-                  setRenamingColumn(null);
-                  setColumnTitle('');
-                }}
-              >
-                Cancel
-              </button>
-              <button className="h-9 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800" type="submit">
-                Save column
               </button>
             </div>
           </form>
@@ -3337,6 +3531,176 @@ function LabelList({ labels }: { labels: CardLabel[] }) {
   ) : null;
 }
 
+function RoadmapDropZone({ id, label, className, children }: { id: string; label: string; className: string; children: ReactNode }) {
+  const { isOver, setNodeRef } = useDroppable({ id });
+
+  return (
+    <section
+      ref={setNodeRef}
+      className={`${className} ${isOver ? 'ring-2 ring-slate-950 ring-offset-2' : ''}`}
+      aria-label={label}
+      role="region"
+    >
+      {children}
+    </section>
+  );
+}
+
+function RoadmapCardRow({
+  roadmapCard,
+  epics,
+  allCards,
+  canWrite,
+  dependencyDraft,
+  onAssign,
+  onDependencyDraftChange,
+  onAddDependency,
+  onRemoveDependency,
+}: {
+  roadmapCard: RoadmapCard;
+  epics: Epic[];
+  allCards: Card[];
+  canWrite: boolean;
+  dependencyDraft: string;
+  onAssign: (card: Card, epicId: string) => void;
+  onDependencyDraftChange: (cardId: string, blockerCardId: string) => void;
+  onAddDependency: (card: Card) => void;
+  onRemoveDependency: (dependency: CardDependency) => void;
+}) {
+  const card = roadmapCard.card;
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: roadmapCardDragId(card.id),
+    disabled: !canWrite,
+  });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.65 : 1,
+  };
+  const existingBlockers = new Set(roadmapCard.blockedBy.map((dependency) => dependency.blockerCardId));
+  const blockerOptions = allCards.filter((candidate) => candidate.id !== card.id && !existingBlockers.has(candidate.id));
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-md border border-slate-200 bg-white p-3 shadow-sm ${
+        canWrite ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'
+      }`}
+      aria-label={`Roadmap card ${card.title}`}
+      {...(canWrite ? listeners : {})}
+      {...(canWrite ? attributes : {})}
+    >
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <p className="text-xs font-medium uppercase text-slate-400">{card.id.slice(0, 8)}</p>
+          {card.boardName ? (
+            <span className="inline-flex h-5 items-center rounded border border-slate-200 bg-slate-50 px-1.5 text-xs text-slate-500">
+              {card.boardName}
+            </span>
+          ) : null}
+          {roadmapCard.columnTitle ? (
+            <span className="inline-flex h-5 items-center rounded border border-slate-200 bg-slate-50 px-1.5 text-xs text-slate-500">
+              {roadmapCard.columnTitle}
+            </span>
+          ) : null}
+        </div>
+        <h3 className="mt-1 text-sm font-medium text-slate-950">{card.title}</h3>
+        <p className="mt-1 line-clamp-2 text-sm text-slate-500">{card.description}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5">
+            <UserRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+            <span className="max-w-40 truncate">{cardAssigneeText(card)}</span>
+          </span>
+          <span className={priorityChipClass(card.priority)} aria-label={`Priority ${card.priority}`} title={`Priority ${card.priority}`}>
+            <PriorityIcon priority={card.priority} />
+          </span>
+          <DueBadge due={card.due} />
+          {card.labels.map((label) => (
+            <span key={label.id} className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-50 px-1.5 text-slate-600">
+              {label.name}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2">
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium text-slate-600">Epic</span>
+          <select
+            className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs outline-none focus:border-slate-950 disabled:bg-slate-50"
+            aria-label={`Epic assignment for ${card.title}`}
+            value={card.epicId ?? ''}
+            onChange={(event) => onAssign(card, event.target.value)}
+            disabled={!canWrite}
+          >
+            <option value="">No epic</option>
+            {epics.map((epic) => (
+              <option key={epic.id} value={epic.id}>
+                {epic.title}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-slate-600">Blocked by</span>
+            <select
+              className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs outline-none focus:border-slate-950 disabled:bg-slate-50"
+              aria-label={`Dependency blocker for ${card.title}`}
+              value={dependencyDraft}
+              onChange={(event) => onDependencyDraftChange(card.id, event.target.value)}
+              disabled={!canWrite || blockerOptions.length === 0}
+            >
+              <option value="">Choose blocker</option>
+              {blockerOptions.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="inline-flex h-8 items-center justify-center gap-1.5 self-end rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+            type="button"
+            aria-label={`Add dependency for ${card.title}`}
+            onClick={() => onAddDependency(card)}
+            disabled={!canWrite || !dependencyDraft}
+          >
+            <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Add
+          </button>
+        </div>
+      </div>
+
+      {roadmapCard.blockedBy.length || roadmapCard.blocking.length ? (
+        <div className="mt-3 space-y-1">
+          {roadmapCard.blockedBy.map((dependency) => (
+            <div key={dependency.id} className="flex items-center justify-between gap-2 rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+              <span className="min-w-0 truncate">Blocked by {dependency.blockerTitle}</span>
+              {canWrite ? (
+                <button
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-rose-700 hover:bg-rose-100"
+                  type="button"
+                  aria-label={`Remove dependency ${dependency.blockerTitle} from ${card.title}`}
+                  onClick={() => onRemoveDependency(dependency)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+          ))}
+          {roadmapCard.blocking.map((dependency) => (
+            <p key={dependency.id} className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+              Blocks {dependency.blockedTitle}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function PlanningDropZone({ id, label, className, children }: { id: string; label: string; className: string; children: ReactNode }) {
   const { isOver, setNodeRef } = useDroppable({ id });
 
@@ -3405,13 +3769,11 @@ function PlanningSprintLane({
   plan,
   canManage,
   canMoveCards,
-  onStart,
   onComplete,
 }: {
   plan: SprintPlan;
   canManage: boolean;
   canMoveCards: boolean;
-  onStart?: (sprint: Sprint) => void;
   onComplete?: (sprint: Sprint) => void;
 }) {
   const cardCount = plan.cards.length;
@@ -3449,18 +3811,6 @@ function PlanningSprintLane({
           No assigned cards yet.
         </p>
       )}
-
-      {plan.sprint.status === 'planned' && canManage ? (
-        <button
-          className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-xs font-medium text-white hover:bg-slate-800"
-          type="button"
-          aria-label={`Start ${plan.sprint.name}`}
-          onClick={() => onStart?.(plan.sprint)}
-        >
-          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-          Start
-        </button>
-      ) : null}
 
       {plan.sprint.status === 'active' && canManage ? (
         <button
@@ -3510,6 +3860,10 @@ function planningDashboardURL(teamId: string) {
   return `/api/planning?teamId=${encodeURIComponent(teamId)}`;
 }
 
+function roadmapDashboardURL(teamId: string) {
+  return `/api/roadmap?teamId=${encodeURIComponent(teamId)}`;
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -3557,6 +3911,7 @@ export function normalizeCard(card: Card): Card {
     boardId: card.boardId ?? '',
     boardName: card.boardName ?? '',
     sprintId: card.sprintId ?? '',
+    epicId: card.epicId ?? '',
     assigneeId: card.assigneeId ?? '',
     assigneeName: card.assigneeName ?? '',
     assigneeEmail: card.assigneeEmail ?? '',
@@ -3586,6 +3941,61 @@ export function normalizePlanningDashboard(dashboard: PlanningDashboard): Planni
   };
 }
 
+export function normalizeRoadmapDashboard(dashboard: RoadmapDashboard): RoadmapDashboard {
+  return {
+    teamId: dashboard.teamId ?? '',
+    teamName: dashboard.teamName ?? '',
+    epics: sortRoadmapEpics((dashboard.epics ?? []).map(normalizeRoadmapEpic)),
+    unassignedCards: sortRoadmapCards(dashboard.unassignedCards ?? []),
+    dependencies: sortCardDependencies(dashboard.dependencies ?? []),
+  };
+}
+
+function normalizeRoadmapEpic(plan: RoadmapEpic): RoadmapEpic {
+  return {
+    epic: normalizeEpic(plan.epic),
+    cards: sortRoadmapCards(plan.cards ?? []),
+    totalCards: Number(plan.totalCards ?? 0),
+    completedCards: Number(plan.completedCards ?? 0),
+    blockedCards: Number(plan.blockedCards ?? 0),
+    progress: Number(plan.progress ?? 0),
+    risk: plan.risk ?? 'on_track',
+  };
+}
+
+function normalizeRoadmapCard(roadmapCard: RoadmapCard): RoadmapCard {
+  return {
+    card: normalizeCard(roadmapCard.card),
+    columnTitle: roadmapCard.columnTitle ?? '',
+    blockedBy: sortCardDependencies(roadmapCard.blockedBy ?? []),
+    blocking: sortCardDependencies(roadmapCard.blocking ?? []),
+  };
+}
+
+function normalizeEpic(epic: Epic): Epic {
+  return {
+    ...epic,
+    workspaceId: epic.workspaceId ?? '',
+    teamId: epic.teamId ?? '',
+    slug: epic.slug ?? '',
+    description: epic.description ?? '',
+    status: epic.status ?? 'planned',
+    startsOn: epic.startsOn ?? '',
+    targetOn: epic.targetOn ?? '',
+  };
+}
+
+function normalizeCardDependency(dependency: CardDependency): CardDependency {
+  return {
+    ...dependency,
+    blockedCardId: dependency.blockedCardId ?? '',
+    blockedTitle: dependency.blockedTitle ?? '',
+    blockerCardId: dependency.blockerCardId ?? '',
+    blockerTitle: dependency.blockerTitle ?? '',
+    relationType: dependency.relationType ?? 'blocks',
+  };
+}
+
 export function normalizeSprintPlan(plan: SprintPlan): SprintPlan {
   return {
     sprint: normalizeSprint(plan.sprint),
@@ -3612,14 +4022,34 @@ function normalizeTeam(team: Team): Team {
 export function addSprintToDashboard(dashboard: PlanningDashboard, sprint: Sprint): PlanningDashboard {
   const current = normalizePlanningDashboard(dashboard);
   const nextSprint = normalizeSprint(sprint);
-  const existing = current.plannedSprints.some((plan) => plan.sprint.id === nextSprint.id);
-  const plannedSprints = existing
-    ? current.plannedSprints.map((plan) => (plan.sprint.id === nextSprint.id ? { ...plan, sprint: nextSprint } : plan))
-    : [...current.plannedSprints, { sprint: nextSprint, cards: [] }];
+  const existingPlan =
+    (current.activeSprint?.sprint.id === nextSprint.id ? current.activeSprint : null) ??
+    current.plannedSprints.find((plan) => plan.sprint.id === nextSprint.id) ??
+    current.completedSprints.find((plan) => plan.sprint.id === nextSprint.id) ?? { sprint: nextSprint, cards: [] };
+  const nextPlan = { ...existingPlan, sprint: nextSprint };
+  const withoutSprint = {
+    ...current,
+    activeSprint: current.activeSprint?.sprint.id === nextSprint.id ? null : current.activeSprint,
+    plannedSprints: current.plannedSprints.filter((plan) => plan.sprint.id !== nextSprint.id),
+    completedSprints: current.completedSprints.filter((plan) => plan.sprint.id !== nextSprint.id),
+  };
+
+  if (nextSprint.status === 'active') {
+    return {
+      ...withoutSprint,
+      activeSprint: nextPlan,
+    };
+  }
+  if (nextSprint.status === 'completed') {
+    return {
+      ...withoutSprint,
+      completedSprints: sortSprintPlans([...withoutSprint.completedSprints, nextPlan]),
+    };
+  }
 
   return {
-    ...current,
-    plannedSprints: sortSprintPlans(plannedSprints),
+    ...withoutSprint,
+    plannedSprints: sortSprintPlans([...withoutSprint.plannedSprints, nextPlan]),
   };
 }
 
@@ -3713,6 +4143,114 @@ export function completeSprintInDashboard(dashboard: PlanningDashboard, sprint: 
   };
 }
 
+export function upsertEpicInRoadmap(dashboard: RoadmapDashboard, epic: Epic): RoadmapDashboard {
+  const current = normalizeRoadmapDashboard(dashboard);
+  const nextEpic = normalizeEpic(epic);
+  const exists = current.epics.some((plan) => plan.epic.id === nextEpic.id);
+  const epics = exists
+    ? current.epics.map((plan) => (plan.epic.id === nextEpic.id ? { ...plan, epic: nextEpic } : plan))
+    : [...current.epics, { epic: nextEpic, cards: [], totalCards: 0, completedCards: 0, blockedCards: 0, progress: 0, risk: 'on_track' }];
+
+  return recalculateRoadmapDashboard({
+    ...current,
+    epics: sortRoadmapEpics(epics),
+  });
+}
+
+export function assignCardInRoadmap(dashboard: RoadmapDashboard, card: Card): RoadmapDashboard {
+  const current = normalizeRoadmapDashboard(dashboard);
+  const nextCard = normalizeCard(card);
+  const existingRoadmapCard = findRoadmapCard(current, nextCard.id);
+  const nextRoadmapCard: RoadmapCard = existingRoadmapCard
+    ? { ...existingRoadmapCard, card: nextCard }
+    : {
+        card: nextCard,
+        columnTitle: '',
+        blockedBy: current.dependencies.filter((dependency) => dependency.blockedCardId === nextCard.id),
+        blocking: current.dependencies.filter((dependency) => dependency.blockerCardId === nextCard.id),
+      };
+
+  const withoutCard: RoadmapDashboard = {
+    ...current,
+    unassignedCards: current.unassignedCards.filter((candidate) => candidate.card.id !== nextCard.id),
+    epics: current.epics.map((plan) => ({
+      ...plan,
+      cards: plan.cards.filter((candidate) => candidate.card.id !== nextCard.id),
+    })),
+  };
+
+  if (!nextCard.epicId || !withoutCard.epics.some((plan) => plan.epic.id === nextCard.epicId)) {
+    return recalculateRoadmapDashboard({
+      ...withoutCard,
+      unassignedCards: sortRoadmapCards([...withoutCard.unassignedCards, nextRoadmapCard]),
+    });
+  }
+
+  return recalculateRoadmapDashboard({
+    ...withoutCard,
+    epics: withoutCard.epics.map((plan) =>
+      plan.epic.id === nextCard.epicId
+        ? {
+            ...plan,
+            cards: sortRoadmapCards([...plan.cards, nextRoadmapCard]),
+          }
+        : plan,
+    ),
+  });
+}
+
+export function upsertDependencyInRoadmap(dashboard: RoadmapDashboard, dependency: CardDependency, action: 'add' | 'remove' = 'add'): RoadmapDashboard {
+  const current = normalizeRoadmapDashboard(dashboard);
+  const nextDependency = normalizeCardDependency(dependency);
+  const dependencies =
+    action === 'remove'
+      ? current.dependencies.filter((candidate) => candidate.id !== nextDependency.id)
+      : sortCardDependencies([...current.dependencies.filter((candidate) => candidate.id !== nextDependency.id), nextDependency]);
+
+  return recalculateRoadmapDashboard({
+    ...current,
+    dependencies,
+  });
+}
+
+function recalculateRoadmapDashboard(dashboard: RoadmapDashboard): RoadmapDashboard {
+  const current = normalizeRoadmapDashboard(dashboard);
+  const dependencies = sortCardDependencies(current.dependencies);
+  const hydrateCard = (roadmapCard: RoadmapCard): RoadmapCard => {
+    const card = normalizeCard(roadmapCard.card);
+    return {
+      ...roadmapCard,
+      card,
+      blockedBy: dependencies.filter((dependency) => dependency.blockedCardId === card.id),
+      blocking: dependencies.filter((dependency) => dependency.blockerCardId === card.id),
+    };
+  };
+  const epics = sortRoadmapEpics(
+    current.epics.map((plan) => {
+      const cards = sortRoadmapCards(plan.cards.map(hydrateCard));
+      const completedCards = cards.filter((candidate) => candidate.columnTitle.toLowerCase() === 'done').length;
+      const blockedCards = cards.filter((candidate) => candidate.blockedBy.length > 0).length;
+      const totalCards = cards.length;
+      return {
+        ...plan,
+        cards,
+        totalCards,
+        completedCards,
+        blockedCards,
+        progress: totalCards ? Math.round((completedCards / totalCards) * 100) : 0,
+        risk: blockedCards > 0 ? 'blocked' : totalCards > 0 && completedCards === totalCards ? 'complete' : 'on_track',
+      };
+    }),
+  );
+
+  return {
+    ...current,
+    epics,
+    unassignedCards: sortRoadmapCards(current.unassignedCards.map(hydrateCard)),
+    dependencies,
+  };
+}
+
 export function sortCards(cards: Card[]) {
   return [...cards].map(normalizeCard).sort((left, right) => left.position - right.position || left.title.localeCompare(right.title));
 }
@@ -3723,8 +4261,68 @@ export function sortSprintPlans(plans: SprintPlan[]) {
   });
 }
 
+function sortRoadmapEpics(epics: RoadmapEpic[]) {
+  return [...epics].sort((left, right) => epicSortKey(left.epic).localeCompare(epicSortKey(right.epic)) || left.epic.title.localeCompare(right.epic.title));
+}
+
+function sortRoadmapCards(cards: RoadmapCard[]) {
+  return [...cards].map(normalizeRoadmapCard).sort((left, right) => left.card.position - right.card.position || left.card.title.localeCompare(right.card.title));
+}
+
+function sortCardDependencies(dependencies: CardDependency[]) {
+  return [...dependencies]
+    .map(normalizeCardDependency)
+    .sort((left, right) => left.blockedTitle.localeCompare(right.blockedTitle) || left.blockerTitle.localeCompare(right.blockerTitle) || left.id.localeCompare(right.id));
+}
+
 export function sprintSortKey(sprint: Sprint) {
   return sprint.startsOn || sprint.startedAt || sprint.completedAt || sprint.name || sprint.id;
+}
+
+export function sprintWeekRange(weekInput: string) {
+  const match = /^(\d{4})-W(\d{2})$/.exec(weekInput.trim());
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(week) || week < 1 || week > 53) {
+    return null;
+  }
+
+  const weekOneMonday = isoWeekOneMonday(year);
+  const startsOn = new Date(weekOneMonday);
+  startsOn.setUTCDate(weekOneMonday.getUTCDate() + (week - 1) * 7);
+  const endsOn = new Date(startsOn);
+  endsOn.setUTCDate(startsOn.getUTCDate() + 6);
+  return { startsOn: formatISODate(startsOn), endsOn: formatISODate(endsOn) };
+}
+
+function currentSprintWeekInput() {
+  const now = new Date();
+  const date = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+  const year = date.getUTCFullYear();
+  const weekOneMonday = isoWeekOneMonday(year);
+  const week = Math.floor((date.getTime() - weekOneMonday.getTime()) / (7 * 24 * 60 * 60 * 1000)) + 1;
+  return `${year}-W${String(week).padStart(2, '0')}`;
+}
+
+function isoWeekOneMonday(year: number) {
+  const januaryFourth = new Date(Date.UTC(year, 0, 4));
+  const day = januaryFourth.getUTCDay() || 7;
+  const monday = new Date(januaryFourth);
+  monday.setUTCDate(januaryFourth.getUTCDate() - day + 1);
+  return monday;
+}
+
+function formatISODate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function epicSortKey(epic: Epic) {
+  return epic.startsOn || epic.targetOn || epic.title || epic.id;
 }
 
 export function sprintWindow(sprint: Sprint) {
@@ -3736,6 +4334,19 @@ export function sprintWindow(sprint: Sprint) {
   }
   if (sprint.endsOn) {
     return `Ends ${sprint.endsOn}`;
+  }
+  return 'Dates not set';
+}
+
+export function epicWindow(epic: Epic) {
+  if (epic.startsOn && epic.targetOn) {
+    return `${epic.startsOn} - ${epic.targetOn}`;
+  }
+  if (epic.startsOn) {
+    return `Starts ${epic.startsOn}`;
+  }
+  if (epic.targetOn) {
+    return `Targets ${epic.targetOn}`;
   }
   return 'Dates not set';
 }
@@ -4000,6 +4611,17 @@ export function findPlanningCard(dashboard: PlanningDashboard, cardId: string) {
   return cards.find((card) => card.id === cardId);
 }
 
+function roadmapDashboardCards(dashboard: RoadmapDashboard) {
+  return [
+    ...dashboard.unassignedCards,
+    ...dashboard.epics.flatMap((plan) => plan.cards),
+  ];
+}
+
+function findRoadmapCard(dashboard: RoadmapDashboard, cardId: string) {
+  return roadmapDashboardCards(dashboard).find((candidate) => candidate.card.id === cardId);
+}
+
 function planningCardDragId(cardId: string) {
   return `planning-card:${cardId}`;
 }
@@ -4028,6 +4650,34 @@ export function resolvePlanningMoveTarget(activeId: string, overId: string) {
   return { cardId, sprintId };
 }
 
+function roadmapCardDragId(cardId: string) {
+  return `roadmap-card:${cardId}`;
+}
+
+function roadmapCardIdFromDragId(id: string) {
+  return id.startsWith('roadmap-card:') ? id.slice('roadmap-card:'.length) : null;
+}
+
+function roadmapEpicDropId(epicId: string) {
+  return `roadmap-epic:${epicId}`;
+}
+
+function epicIdFromRoadmapDropId(id: string) {
+  if (id === 'roadmap-unassigned') {
+    return '';
+  }
+  return id.startsWith('roadmap-epic:') ? id.slice('roadmap-epic:'.length) : null;
+}
+
+export function resolveRoadmapMoveTarget(activeId: string, overId: string) {
+  const cardId = roadmapCardIdFromDragId(activeId);
+  const epicId = epicIdFromRoadmapDropId(overId);
+  if (cardId === null || epicId === null) {
+    return null;
+  }
+  return { cardId, epicId };
+}
+
 export function sprintStatusDisplay(status: Sprint['status']) {
   switch (status) {
     case 'active':
@@ -4048,6 +4698,50 @@ export function sprintStatusDisplay(status: Sprint['status']) {
         containerClass: 'border-slate-200 bg-white',
         badgeClass: 'bg-slate-100 text-slate-600',
       };
+  }
+}
+
+export function epicStatusLabel(status: Epic['status']) {
+  switch (status) {
+    case 'active':
+      return 'Active';
+    case 'done':
+      return 'Done';
+    default:
+      return 'Planned';
+  }
+}
+
+export function epicStatusClass(status: Epic['status']) {
+  switch (status) {
+    case 'active':
+      return 'bg-emerald-100 text-emerald-700';
+    case 'done':
+      return 'bg-slate-200 text-slate-600';
+    default:
+      return 'bg-slate-100 text-slate-600';
+  }
+}
+
+export function roadmapRiskLabel(risk: string) {
+  switch (risk) {
+    case 'blocked':
+      return 'Blocked';
+    case 'complete':
+      return 'Complete';
+    default:
+      return 'On track';
+  }
+}
+
+export function roadmapRiskClass(risk: string) {
+  switch (risk) {
+    case 'blocked':
+      return 'bg-rose-100 text-rose-700';
+    case 'complete':
+      return 'bg-emerald-100 text-emerald-700';
+    default:
+      return 'bg-sky-100 text-sky-700';
   }
 }
 
