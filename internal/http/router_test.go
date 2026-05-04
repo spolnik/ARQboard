@@ -410,6 +410,120 @@ func TestRouterProtectsWorkspaceAPIsWhenAuthStoreIsConfigured(t *testing.T) {
 	}
 }
 
+func TestRouterFiltersResourcesThroughAccessStore(t *testing.T) {
+	user := testUser()
+	access := &fakeAccessStore{
+		teams: []db.Team{{ID: "team-1", Name: "Platform Engineering"}},
+		boards: []db.BoardSummary{
+			{ID: "board-1", TeamID: "team-1", Name: "Platform Board"},
+		},
+		wikiPages: []db.WikiPage{{ID: "wiki-1", Title: "Platform Runbook"}},
+	}
+	router := NewRouter(Options{
+		AuthStore:   &fakeAuthStore{user: user},
+		AccessStore: access,
+		TeamStore:   &fakeTeamStore{},
+		BoardStore:  fakeBoardStore{},
+	})
+
+	for _, tt := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "teams", path: "/api/teams", want: "Platform Engineering"},
+		{name: "boards", path: "/api/boards", want: "Platform Board"},
+		{name: "wiki", path: "/api/wiki", want: "Platform Runbook"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+			}
+			if !strings.Contains(res.Body.String(), tt.want) {
+				t.Fatalf("body = %q, want %q", res.Body.String(), tt.want)
+			}
+		})
+	}
+	if access.lastUser.ID != user.ID {
+		t.Fatalf("access user = %#v, want current user", access.lastUser)
+	}
+}
+
+func TestRouterAuthorizesRoleScopedWrites(t *testing.T) {
+	user := testUser()
+	user.IsAdmin = false
+	forbidden := &fakeAccessStore{err: db.ErrForbidden}
+	router := NewRouter(Options{
+		AuthStore:   &fakeAuthStore{user: user},
+		AccessStore: forbidden,
+		BoardStore: fakeBoardStore{
+			card: db.BoardCard{ID: "card-1", ColumnID: "column-1", Title: "New work"},
+		},
+	})
+
+	blocked := httptest.NewRecorder()
+	blockedReq := httptest.NewRequest(http.MethodPost, "/api/cards", bytes.NewBufferString(`{"columnId":"column-1","title":"New work"}`))
+	blockedReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(blocked, blockedReq)
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("blocked status = %d, want %d", blocked.Code, http.StatusForbidden)
+	}
+
+	allowedAccess := &fakeAccessStore{}
+	allowedRouter := NewRouter(Options{
+		AuthStore:   &fakeAuthStore{user: user},
+		AccessStore: allowedAccess,
+		BoardStore: fakeBoardStore{
+			card: db.BoardCard{ID: "card-1", ColumnID: "column-1", Title: "New work"},
+		},
+	})
+	allowed := httptest.NewRecorder()
+	allowedReq := httptest.NewRequest(http.MethodPost, "/api/cards", bytes.NewBufferString(`{"columnId":"column-1","title":"New work"}`))
+	allowedReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	allowedRouter.ServeHTTP(allowed, allowedReq)
+	if allowed.Code != http.StatusCreated {
+		t.Fatalf("allowed status = %d, want %d", allowed.Code, http.StatusCreated)
+	}
+	if allowedAccess.lastColumnID != "column-1" || allowedAccess.lastLevel != db.AccessWrite {
+		t.Fatalf("access check = (%q, %q), want column-1 write", allowedAccess.lastColumnID, allowedAccess.lastLevel)
+	}
+}
+
+func TestRouterRequiresManageAccessForTeamAndSprintAdministration(t *testing.T) {
+	user := testUser()
+	user.IsAdmin = false
+	access := &fakeAccessStore{err: db.ErrForbidden}
+	router := NewRouter(Options{
+		AuthStore:   &fakeAuthStore{user: user},
+		AccessStore: access,
+		TeamStore:   &fakeTeamStore{},
+		BoardStore: fakeBoardStore{
+			sprint: db.Sprint{ID: "sprint-1", TeamID: "team-1", Name: "Sprint One", Status: "planned"},
+		},
+	})
+
+	addMember := httptest.NewRecorder()
+	addMemberReq := httptest.NewRequest(http.MethodPost, "/api/teams/team-1/members", bytes.NewBufferString(`{"userId":"user-2","role":"member"}`))
+	addMemberReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(addMember, addMemberReq)
+	if addMember.Code != http.StatusForbidden {
+		t.Fatalf("add member status = %d, want %d", addMember.Code, http.StatusForbidden)
+	}
+
+	startSprint := httptest.NewRecorder()
+	startSprintReq := httptest.NewRequest(http.MethodPost, "/api/sprints/sprint-1/start", nil)
+	startSprintReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(startSprint, startSprintReq)
+	if startSprint.Code != http.StatusForbidden {
+		t.Fatalf("start sprint status = %d, want %d", startSprint.Code, http.StatusForbidden)
+	}
+}
+
 func TestRouterManagesWorkspaceMembersForAdmins(t *testing.T) {
 	store := &fakeTeamStore{
 		members: []db.WorkspaceMember{
@@ -1152,6 +1266,21 @@ type fakeTeamStore struct {
 	err           error
 }
 
+type fakeAccessStore struct {
+	teams        []db.Team
+	boards       []db.BoardSummary
+	wikiPages    []db.WikiPage
+	err          error
+	lastUser     db.User
+	lastTeamID   string
+	lastBoardID  string
+	lastColumnID string
+	lastCardID   string
+	lastSprintID string
+	lastPageID   string
+	lastLevel    db.AccessLevel
+}
+
 func (store *fakeAuthStore) Login(_ context.Context, _ db.LoginParams) (db.LoginSession, error) {
 	if store.err != nil {
 		return db.LoginSession{}, store.err
@@ -1222,6 +1351,72 @@ func (store *fakeTeamStore) UpdateWorkspaceMember(_ context.Context, params db.U
 		return db.WorkspaceMember{}, store.err
 	}
 	return store.updated, nil
+}
+
+func (store *fakeAccessStore) ListTeamsForUser(_ context.Context, user db.User) ([]db.Team, error) {
+	store.lastUser = user
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.teams, nil
+}
+
+func (store *fakeAccessStore) ListBoardsForUser(_ context.Context, user db.User) ([]db.BoardSummary, error) {
+	store.lastUser = user
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.boards, nil
+}
+
+func (store *fakeAccessStore) ListWikiPagesForUser(_ context.Context, user db.User) ([]db.WikiPage, error) {
+	store.lastUser = user
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.wikiPages, nil
+}
+
+func (store *fakeAccessStore) AuthorizeTeam(_ context.Context, user db.User, teamID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastTeamID = teamID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeBoard(_ context.Context, user db.User, boardID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastBoardID = boardID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeColumn(_ context.Context, user db.User, columnID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastColumnID = columnID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeCard(_ context.Context, user db.User, cardID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastCardID = cardID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeSprint(_ context.Context, user db.User, sprintID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastSprintID = sprintID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeWikiPage(_ context.Context, user db.User, pageID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastPageID = pageID
+	store.lastLevel = level
+	return store.err
 }
 
 func (store fakeBoardStore) GetDefaultBoard(context.Context) (db.Board, error) {

@@ -140,7 +140,7 @@ func (store TeamStore) CreateTeam(ctx context.Context, params CreateTeamParams) 
 	if err != nil {
 		return Team{}, err
 	}
-	if err := seedTeamMembersFromWorkspace(ctx, tx, driver, workspaceID, teamID); err != nil {
+	if err := seedTeamManagersFromWorkspace(ctx, tx, driver, workspaceID, teamID); err != nil {
 		return Team{}, err
 	}
 	team, err := loadTeam(ctx, tx, driver, teamID)
@@ -619,6 +619,46 @@ func seedTeamMembersFromWorkspace(ctx context.Context, q sqlQueryer, driver Driv
 		SELECT user_id, role
 		FROM workspace_members
 		WHERE workspace_id = %s
+	`, placeholder(driver, 1)), workspaceID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID string
+		var role string
+		if err := rows.Scan(&userID, &role); err != nil {
+			return err
+		}
+		memberID, err := newID()
+		if err != nil {
+			return err
+		}
+		if driver == DriverPostgres {
+			_, err = q.ExecContext(ctx, `
+				INSERT INTO team_members (id, team_id, user_id, role)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (team_id, user_id) DO NOTHING
+			`, memberID, teamID, userID, role)
+		} else {
+			_, err = q.ExecContext(ctx, `
+				INSERT OR IGNORE INTO team_members (id, team_id, user_id, role)
+				VALUES (?, ?, ?, ?)
+			`, memberID, teamID, userID, role)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func seedTeamManagersFromWorkspace(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, teamID string) error {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT user_id, role
+		FROM workspace_members
+		WHERE workspace_id = %s AND role IN ('owner', 'admin')
 	`, placeholder(driver, 1)), workspaceID)
 	if err != nil {
 		return err

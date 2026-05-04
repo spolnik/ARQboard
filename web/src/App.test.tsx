@@ -22,6 +22,15 @@ import App, {
   sprintStatusDisplay,
   startSprintInDashboard,
   sprintWindow,
+  canManageTeam,
+  canReadTeam,
+  canWriteTeam,
+  teamRoleForUser,
+  addCardToBoard,
+  findPlanningCard,
+  replaceCardInBoard,
+  selectedCardIdForBoard,
+  upsertWikiPageInBoard,
 } from './App';
 
 const userFixture = {
@@ -29,6 +38,20 @@ const userFixture = {
   email: 'admin@example.com',
   displayName: 'Admin',
   isAdmin: true,
+};
+
+const developerUserFixture = {
+  id: 'user-2',
+  email: 'dev@example.com',
+  displayName: 'Dev',
+  isAdmin: false,
+};
+
+const viewerUserFixture = {
+  id: 'user-3',
+  email: 'viewer@example.com',
+  displayName: 'Viewer',
+  isAdmin: false,
 };
 
 const boardFixture = {
@@ -284,6 +307,27 @@ const teamsFixture = [
   },
 ];
 
+const teamAdminFixture = {
+  ...teamsFixture[0],
+  members: [
+    { id: 'team-member-2', teamId: 'team-platform', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'admin', isAdmin: false },
+  ],
+};
+
+const teamMemberFixture = {
+  ...teamsFixture[0],
+  members: [
+    { id: 'team-member-2', teamId: 'team-platform', userId: 'user-2', email: 'dev@example.com', displayName: 'Dev', role: 'member', isAdmin: false },
+  ],
+};
+
+const teamViewerFixture = {
+  ...teamsFixture[0],
+  members: [
+    { id: 'team-member-3', teamId: 'team-platform', userId: 'user-3', email: 'viewer@example.com', displayName: 'Viewer', role: 'viewer', isAdmin: false },
+  ],
+};
+
 const createdTeamFixture = {
   id: 'team-design',
   workspaceId: 'workspace-1',
@@ -360,6 +404,32 @@ function dateOffset(days: number) {
   const month = `${date.getMonth() + 1}`.padStart(2, '0');
   const day = `${date.getDate()}`.padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function stubRoleWorkspace(user: typeof userFixture, team: (typeof teamsFixture)[number], planningResponse: unknown = planningDashboardFixture) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/me') {
+        return jsonResponse(user);
+      }
+      if (url === '/api/boards') {
+        return jsonResponse(boardSummaries);
+      }
+      if (url === '/api/teams') {
+        return jsonResponse([team]);
+      }
+      if (url === '/api/boards/board-1') {
+        return jsonResponse(boardFixture);
+      }
+      if (url === '/api/planning?teamId=team-platform') {
+        return jsonResponse(planningResponse);
+      }
+
+      throw new Error(`Unexpected fetch GET ${url}`);
+    }),
+  );
 }
 
 describe('App', () => {
@@ -1282,8 +1352,15 @@ describe('App', () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: /new card/i }));
-    fireEvent.change(screen.getByLabelText(/card title/i), {
+    const dialog = screen.getByRole('dialog', { name: /create card/i });
+    fireEvent.change(within(dialog).getByLabelText(/card title/i), {
       target: { value: 'Run local smoke test' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/assignee/i), {
+      target: { value: 'user-2' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/labels/i), {
+      target: { value: 'Backend, Risk' },
     });
     expect(screen.queryByLabelText(/owner initials/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /create card/i }));
@@ -1296,8 +1373,8 @@ describe('App', () => {
           body: JSON.stringify({
             columnId: 'column-planned',
             title: 'Run local smoke test',
-            assigneeId: 'user-1',
-            labelNames: [],
+            assigneeId: 'user-2',
+            labelNames: ['Backend', 'Risk'],
           }),
         }),
       ),
@@ -1431,12 +1508,63 @@ describe('App', () => {
     const completedDashboard = { ...dashboard, plannedSprints: [], completedSprints: [{ sprint: completedSprint, cards: [] }] } as DashboardArg;
     expect(assignCardInDashboard(completedDashboard, { ...planningCard, sprintId: completedSprint.id }).completedSprints[0].cards[0].id).toBe('card-1');
 
+    const cleanupDashboard = {
+      ...dashboard,
+      activeSprint: { sprint: activeSprint, cards: [{ ...planningCard, sprintId: activeSprint.id }] },
+      completedSprints: [{ sprint: completedSprint, cards: [{ ...planningCard, sprintId: completedSprint.id }] }],
+    } as DashboardArg;
+    const cleaned = assignCardInDashboard(cleanupDashboard, { ...planningCard, sprintId: '' });
+    expect(cleaned.activeSprint?.cards).toHaveLength(0);
+    expect(cleaned.completedSprints[0].cards).toHaveLength(0);
+
     const started = startSprintInDashboard(dashboard, activeSprint);
     expect(started.activeSprint?.sprint.status).toBe('active');
     expect(started.plannedSprints).toHaveLength(0);
     const finished = completeSprintInDashboard(started, completedSprintBase);
     expect(finished.activeSprint).toBeNull();
     expect(finished.completedSprints[0].sprint.status).toBe('completed');
+  });
+
+  it('updates board-local card and wiki state helpers', () => {
+    type BoardArg = Parameters<typeof addCardToBoard>[0];
+    type CardArg = Parameters<typeof replaceCardInBoard>[1];
+    type PageArg = Parameters<typeof upsertWikiPageInBoard>[1];
+    const board = boardFixture as BoardArg;
+    const card = { ...(boardFixture.columns[0].cards[0] as CardArg), title: 'Updated helper card' };
+    const addedCard = { ...(boardFixture.columns[0].cards[0] as CardArg), id: 'card-helper-add', title: 'Added helper card', position: 2 };
+    const newPage = { id: 'wiki-0', title: 'Architecture notes', slug: 'architecture-notes', bodyMarkdown: '# Architecture' } as PageArg;
+    const editedPage = { ...boardFixture.wikiPages[0], bodyMarkdown: '# Updated deploy' } as PageArg;
+
+    expect(addCardToBoard(null, addedCard)).toBeNull();
+    expect(addCardToBoard(board, addedCard)?.columns[0].cards.some((candidate) => candidate.id === addedCard.id)).toBe(true);
+    expect(replaceCardInBoard(null, card)).toBeNull();
+    expect(replaceCardInBoard(board, card)?.columns[0].cards[0].title).toBe('Updated helper card');
+    expect(selectedCardIdForBoard('card-1', boardFixture as Parameters<typeof selectedCardIdForBoard>[1])).toBe('card-1');
+    expect(selectedCardIdForBoard('missing-card', boardFixture as Parameters<typeof selectedCardIdForBoard>[1])).toBe('');
+    expect(upsertWikiPageInBoard(null, newPage)).toBeNull();
+    expect(upsertWikiPageInBoard(board, newPage)?.wikiPages[0].title).toBe('Architecture notes');
+    expect(upsertWikiPageInBoard(board, editedPage)?.wikiPages.find((page) => page.id === editedPage.id)?.bodyMarkdown).toBe('# Updated deploy');
+  });
+
+  it('finds planning cards across backlog and sprint lanes', () => {
+    type DashboardArg = Parameters<typeof findPlanningCard>[0];
+    const backlogCard = { ...boardFixture.columns[0].cards[0], id: 'planning-backlog-card', sprintId: '' };
+    const activeCard = { ...boardFixture.columns[1].cards[0], id: 'planning-active-card', sprintId: activeSprintFixture.id };
+    const plannedCard = { ...boardFixture.columns[2].cards[0], id: 'planning-planned-card', sprintId: sprintFixture.id };
+    const completedCard = { ...boardFixture.columns[0].cards[0], id: 'planning-completed-card', sprintId: completedSprintFixture.id };
+    const dashboard = {
+      ...planningDashboardFixture,
+      backlog: [backlogCard],
+      activeSprint: { sprint: activeSprintFixture, cards: [activeCard] },
+      plannedSprints: [{ sprint: sprintFixture, cards: [plannedCard] }],
+      completedSprints: [{ sprint: completedSprintFixture, cards: [completedCard] }],
+    } as DashboardArg;
+
+    expect(findPlanningCard(dashboard, 'planning-backlog-card')?.title).toBe(backlogCard.title);
+    expect(findPlanningCard(dashboard, 'planning-active-card')?.title).toBe(activeCard.title);
+    expect(findPlanningCard(dashboard, 'planning-planned-card')?.title).toBe(plannedCard.title);
+    expect(findPlanningCard(dashboard, 'planning-completed-card')?.title).toBe(completedCard.title);
+    expect(findPlanningCard(dashboard, 'missing-card')).toBeUndefined();
   });
 
   it('sorts cards and sprints for planning timelines', () => {
@@ -1510,6 +1638,72 @@ describe('App', () => {
     expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], null)).toBe('');
     expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], userFixture)).toBe('user-1');
     expect(defaultAssigneeId(boardFixture as Parameters<typeof defaultAssigneeId>[0], { ...userFixture, id: 'missing-user' })).toBe('');
+  });
+
+  it('resolves team role capabilities for the current user', () => {
+    expect(teamRoleForUser(teamsFixture[0] as Parameters<typeof teamRoleForUser>[0], userFixture)).toBe('owner');
+    expect(teamRoleForUser(teamAdminFixture as Parameters<typeof teamRoleForUser>[0], developerUserFixture)).toBe('admin');
+    expect(teamRoleForUser(teamMemberFixture as Parameters<typeof teamRoleForUser>[0], developerUserFixture)).toBe('member');
+    expect(teamRoleForUser(teamViewerFixture as Parameters<typeof teamRoleForUser>[0], viewerUserFixture)).toBe('viewer');
+
+    expect(canManageTeam(teamAdminFixture as Parameters<typeof canManageTeam>[0], developerUserFixture)).toBe(true);
+    expect(canWriteTeam(teamMemberFixture as Parameters<typeof canWriteTeam>[0], developerUserFixture)).toBe(true);
+    expect(canManageTeam(teamMemberFixture as Parameters<typeof canManageTeam>[0], developerUserFixture)).toBe(false);
+    expect(canReadTeam(teamViewerFixture as Parameters<typeof canReadTeam>[0], viewerUserFixture)).toBe(true);
+    expect(canWriteTeam(teamViewerFixture as Parameters<typeof canWriteTeam>[0], viewerUserFixture)).toBe(false);
+    expect(canManageTeam(null, { ...userFixture, id: 'global-admin-without-membership' })).toBe(true);
+    expect(canReadTeam(null, null)).toBe(false);
+  });
+
+  it('keeps viewer users in read-only workspace mode', async () => {
+    stubRoleWorkspace(viewerUserFixture, teamViewerFixture, {
+      ...planningDashboardFixture,
+      plannedSprints: [{ sprint: sprintFixture, cards: [] }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /new card/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /settings/i })).not.toBeInTheDocument();
+
+    await clickPrimaryNavButton(/wiki/i);
+    expect(screen.queryByRole('button', { name: /new wiki page/i })).not.toBeInTheDocument();
+
+    await clickPrimaryNavButton(/planning/i);
+    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-05 platform/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create sprint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start sprint 2026-05 platform/i })).not.toBeInTheDocument();
+  });
+
+  it('allows member users to write cards and wiki while hiding administration', async () => {
+    stubRoleWorkspace(developerUserFixture, teamMemberFixture);
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /new card/i })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /settings/i })).not.toBeInTheDocument();
+
+    await clickPrimaryNavButton(/wiki/i);
+    expect(screen.getByRole('button', { name: /new wiki page/i })).toBeEnabled();
+
+    await clickPrimaryNavButton(/planning/i);
+    expect(screen.queryByRole('button', { name: /create sprint/i })).not.toBeInTheDocument();
+  });
+
+  it('allows team admins to manage board structure without workspace user administration', async () => {
+    stubRoleWorkspace(developerUserFixture, teamAdminFixture);
+
+    render(<App />);
+
+    await clickPrimaryNavButton(/settings/i);
+
+    expect(await screen.findByRole('heading', { name: /workspace settings/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /new board/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /add column/i })).toBeEnabled();
+    expect(screen.queryByLabelText(/member email/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/admin access is required to manage workspace members/i)).toBeInTheDocument();
   });
 
   it('filters cards and wiki pages with workspace search', async () => {
@@ -1898,6 +2092,7 @@ describe('App', () => {
           body: JSON.stringify({
             title: 'Release runbook',
             bodyMarkdown: '# Release runbook\n\nShip carefully.',
+            boardId: 'board-1',
           }),
         }),
       ),

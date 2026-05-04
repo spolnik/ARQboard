@@ -95,12 +95,13 @@ func serve(ctx context.Context, args []string, lookup envLookup, stderr io.Write
 	defer pool.Close()
 
 	router := httpapi.NewRouter(httpapi.Options{
-		Readiness:  db.ReadinessChecker{Conn: pool},
-		BoardStore: db.BoardStore{Conn: pool},
-		AuthStore:  db.AuthStore{Conn: pool},
-		TeamStore:  db.TeamStore{Conn: pool},
-		StaticFS:   os.DirFS(cfg.WebDistDir),
-		Logger:     logger,
+		Readiness:   db.ReadinessChecker{Conn: pool},
+		BoardStore:  db.BoardStore{Conn: pool},
+		AuthStore:   db.AuthStore{Conn: pool},
+		TeamStore:   db.TeamStore{Conn: pool},
+		AccessStore: db.AccessStore{Conn: pool},
+		StaticFS:    os.DirFS(cfg.WebDistDir),
+		Logger:      logger,
 	})
 
 	server := &http.Server{

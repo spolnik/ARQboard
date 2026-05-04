@@ -11,6 +11,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrValidation = errors.New("validation failed")
+var ErrForbidden = errors.New("forbidden")
 
 type Board struct {
 	ID          string            `json:"id"`
@@ -144,6 +145,7 @@ type CreateCardCommentParams struct {
 }
 
 type CreateWikiPageParams struct {
+	BoardID      string
 	Title        string
 	BodyMarkdown string
 }
@@ -969,13 +971,16 @@ func (store BoardStore) CreateWikiPage(ctx context.Context, params CreateWikiPag
 	}
 	defer tx.Rollback()
 
-	boardID, err := ensureDefaultBoard(ctx, tx, driver)
-	if err != nil {
-		return WikiPage{}, err
+	boardID := strings.TrimSpace(params.BoardID)
+	if boardID == "" {
+		boardID, err = ensureDefaultBoard(ctx, tx, driver)
+		if err != nil {
+			return WikiPage{}, err
+		}
 	}
 	var workspaceID string
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT workspace_id FROM boards WHERE id = %s", placeholder(driver, 1)), boardID).Scan(&workspaceID); err != nil {
-		return WikiPage{}, err
+		return WikiPage{}, notFoundOrErr(err)
 	}
 
 	pageID, err := newID()
