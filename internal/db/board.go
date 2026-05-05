@@ -381,7 +381,20 @@ func (store BoardStore) GetBoard(ctx context.Context, boardID string) (Board, er
 		return Board{}, err
 	}
 
-	return loadBoard(ctx, sqlDB, driver, boardID)
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return Board{}, err
+	}
+	defer tx.Rollback()
+
+	board, err := loadBoard(ctx, tx, driver, boardID)
+	if err != nil {
+		return Board{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Board{}, err
+	}
+	return board, nil
 }
 
 func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParams) (Board, error) {
@@ -1475,6 +1488,9 @@ func loadBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string)
 		return Board{}, notFoundOrErr(err)
 	}
 	if err := ensureAdminWorkspaceMembers(ctx, q, driver, board.WorkspaceID); err != nil {
+		return Board{}, err
+	}
+	if _, err := ensureActiveSprintForBoard(ctx, q, driver, board.WorkspaceID, boardID); err != nil {
 		return Board{}, err
 	}
 
