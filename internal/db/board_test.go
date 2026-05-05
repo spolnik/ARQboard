@@ -176,6 +176,13 @@ func TestBoardManagementCreatesListsAndLoadsBoards(t *testing.T) {
 	if loaded.ID != created.ID {
 		t.Fatalf("loaded board ID = %q, want %q", loaded.ID, created.ID)
 	}
+	activeSprintID, found, err := activeSprintIDForBoard(ctx, store.Conn.SQL, store.Conn.Driver, created.ID)
+	if err != nil {
+		t.Fatalf("activeSprintIDForBoard returned error: %v", err)
+	}
+	if !found || activeSprintID == "" {
+		t.Fatal("GetBoard did not create an active current-week sprint")
+	}
 
 	duplicateSlug, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Release Train"})
 	if err != nil {

@@ -82,6 +82,9 @@ func (store BoardStore) GetPlanningDashboard(ctx context.Context, scopeID string
 	if err != nil {
 		return PlanningDashboard{}, err
 	}
+	if _, err := ensureCurrentSprintForTeam(ctx, tx, driver, teamID); err != nil {
+		return PlanningDashboard{}, err
+	}
 
 	dashboard, err := loadPlanningDashboard(ctx, tx, driver, teamID)
 	if err != nil {
@@ -644,6 +647,18 @@ func listBoardSummariesForTeam(ctx context.Context, q sqlQueryer, driver Driver,
 		return nil, err
 	}
 	return boards, nil
+}
+
+func ensureCurrentSprintForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, error) {
+	workspaceID, err := loadTeamWorkspace(ctx, q, driver, teamID)
+	if err != nil {
+		return "", err
+	}
+	boardID, err := defaultBoardIDForTeam(ctx, q, driver, teamID)
+	if err != nil {
+		return "", err
+	}
+	return ensureActiveSprintForBoard(ctx, q, driver, workspaceID, boardID)
 }
 
 func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string, boardID string) (string, error) {
