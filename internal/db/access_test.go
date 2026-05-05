@@ -41,9 +41,9 @@ func TestAccessStoreFiltersTeamsBoardsAndWikiByMembership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTeam returned error: %v", err)
 	}
-	otherBoard, err := boardStore.CreateBoard(ctx, CreateBoardParams{Name: "Mobile Board", TeamID: otherTeam.ID})
+	otherBoard, err := singleBoardForTeam(ctx, boardStore, otherTeam.ID)
 	if err != nil {
-		t.Fatalf("CreateBoard returned error: %v", err)
+		t.Fatalf("singleBoardForTeam returned error: %v", err)
 	}
 	otherPage, err := boardStore.CreateWikiPage(ctx, CreateWikiPageParams{
 		BoardID:      otherBoard.ID,

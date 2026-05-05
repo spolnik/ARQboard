@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Sprint struct {
@@ -95,9 +96,9 @@ func (store BoardStore) GetPlanningDashboard(ctx context.Context, scopeID string
 func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintParams) (Sprint, error) {
 	boardID := strings.TrimSpace(params.BoardID)
 	teamID := strings.TrimSpace(params.TeamID)
-	name := strings.TrimSpace(params.Name)
-	if name == "" {
-		return Sprint{}, fmt.Errorf("%w: sprint name is required", ErrValidation)
+	name, startsOn, endsOn, err := weeklySprintWindowFromInput(params.StartsOn)
+	if err != nil {
+		return Sprint{}, err
 	}
 
 	sqlDB, driver, err := store.database()
@@ -139,14 +140,26 @@ func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintPar
 	if boardWorkspaceID != workspaceID || boardTeamID != teamID {
 		return Sprint{}, fmt.Errorf("%w: sprint board must belong to the selected team", ErrValidation)
 	}
+	activeCount, err := countActiveSprints(ctx, tx, driver, teamID)
+	if err != nil {
+		return Sprint{}, err
+	}
+	status := "planned"
+	if startsOn == currentWeeklySprintStart() && activeCount == 0 {
+		status = "active"
+	}
 	sprintID, err := newID()
 	if err != nil {
 		return Sprint{}, err
 	}
 
+	startedAt := "NULL"
+	if status == "active" {
+		startedAt = currentTimestamp(driver)
+	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, starts_on, ends_on)
-		VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, status, starts_on, ends_on, started_at)
+		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
@@ -156,10 +169,12 @@ func (store BoardStore) CreateSprint(ctx context.Context, params CreateSprintPar
 		placeholder(driver, 6),
 		placeholder(driver, 7),
 		placeholder(driver, 8),
-	), sprintID, workspaceID, teamID, boardID, name, strings.TrimSpace(params.Goal), nullableString(params.StartsOn), nullableString(params.EndsOn))
+		placeholder(driver, 9),
+		startedAt,
+	), sprintID, workspaceID, teamID, boardID, name, strings.TrimSpace(params.Goal), status, startsOn, endsOn)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return Sprint{}, fmt.Errorf("%w: sprint name already exists", ErrValidation)
+			return Sprint{}, fmt.Errorf("%w: sprint week already exists", ErrValidation)
 		}
 		return Sprint{}, err
 	}
@@ -435,7 +450,7 @@ func loadPlanningDashboard(ctx context.Context, q sqlQueryer, driver Driver, tea
 
 func loadBacklogCards(ctx context.Context, q sqlQueryer, driver Driver, teamID string) ([]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT cards.id, cards.column_id, %s, COALESCE(boards.name, ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+		SELECT cards.id, cards.column_id, %s, COALESCE(boards.name, ''), cards.sprint_id, cards.epic_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
 			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
 		JOIN boards ON boards.id = cards.board_id
@@ -507,7 +522,7 @@ func loadSprintPlans(ctx context.Context, q sqlQueryer, driver Driver, teamID st
 
 func loadSprintCards(ctx context.Context, q sqlQueryer, driver Driver, sprintID string) ([]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.epic_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
 			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
 		LEFT JOIN users ON users.id = cards.assignee_id
@@ -581,20 +596,14 @@ func loadBoardScope(ctx context.Context, q sqlQueryer, driver Driver, boardID st
 }
 
 func defaultBoardIDForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, error) {
-	boardID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
-		SELECT id
-		FROM boards
-		WHERE team_id = %s
-		ORDER BY created_at, id
-		LIMIT 1
-	`, placeholder(driver, 1)), teamID)
+	boardID, found, err := boardIDForTeam(ctx, q, driver, teamID)
 	if err != nil {
 		return "", err
 	}
-	if !found {
-		return "", fmt.Errorf("%w: team needs a board before a sprint can be created", ErrValidation)
+	if found {
+		return boardID, nil
 	}
-	return boardID, nil
+	return ensureBoardForTeam(ctx, q, driver, teamID)
 }
 
 func listBoardSummariesForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) ([]BoardSummary, error) {
@@ -654,13 +663,34 @@ func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver
 	if err != nil {
 		return "", err
 	}
-	name, err := uniqueSprintName(ctx, q, driver, teamID, "Current sprint")
+	name, startsOn, endsOn := weeklySprintWindow(time.Now())
+	existingSprintID, found, err := lookupID(ctx, q, driver, fmt.Sprintf(`
+		SELECT id
+		FROM sprints
+		WHERE team_id = %s AND name = %s
+	`, placeholder(driver, 1), placeholder(driver, 2)), teamID, name)
 	if err != nil {
 		return "", err
 	}
+	if found {
+		result, err := q.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE sprints
+			SET status = 'active',
+				started_at = COALESCE(started_at, %s),
+				updated_at = %s
+			WHERE id = %s AND status = 'planned'
+		`, currentTimestamp(driver), currentTimestamp(driver), placeholder(driver, 1)), existingSprintID)
+		if err != nil {
+			return "", err
+		}
+		if rows, err := result.RowsAffected(); err == nil && rows > 0 {
+			return existingSprintID, nil
+		}
+		return "", nil
+	}
 	_, err = q.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, status, started_at)
-		VALUES (%s, %s, %s, %s, %s, %s, 'active', %s)
+		INSERT INTO sprints (id, workspace_id, team_id, board_id, name, goal, status, starts_on, ends_on, started_at)
+		VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
 	`,
 		placeholder(driver, 1),
 		placeholder(driver, 2),
@@ -668,12 +698,48 @@ func ensureActiveSprintForBoard(ctx context.Context, q sqlQueryer, driver Driver
 		placeholder(driver, 4),
 		placeholder(driver, 5),
 		placeholder(driver, 6),
+		placeholder(driver, 7),
+		placeholder(driver, 8),
 		currentTimestamp(driver),
-	), sprintID, workspaceID, teamID, boardID, name, "Current work for this team.")
+	), sprintID, workspaceID, teamID, boardID, name, "Current work for this team.", startsOn, endsOn)
 	if err != nil {
 		return "", err
 	}
 	return sprintID, nil
+}
+
+func weeklySprintWindowFromInput(startsOn string) (string, string, string, error) {
+	startsOn = strings.TrimSpace(startsOn)
+	if startsOn == "" {
+		name, start, end := weeklySprintWindow(time.Now())
+		return name, start, end, nil
+	}
+	start, err := time.ParseInLocation("2006-01-02", startsOn, time.Local)
+	if err != nil {
+		return "", "", "", fmt.Errorf("%w: startsOn must be a YYYY-MM-DD date", ErrValidation)
+	}
+	name, startDate, endDate := weeklySprintWindow(start)
+	return name, startDate, endDate, nil
+}
+
+func weeklySprintWindow(reference time.Time) (string, string, string) {
+	if reference.IsZero() {
+		reference = time.Now()
+	}
+	date := time.Date(reference.Year(), reference.Month(), reference.Day(), 0, 0, 0, 0, reference.Location())
+	weekday := int(date.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	start := date.AddDate(0, 0, -(weekday - 1))
+	end := start.AddDate(0, 0, 6)
+	year, week := start.ISOWeek()
+	return fmt.Sprintf("Sprint %04d-W%02d", year, week), start.Format("2006-01-02"), end.Format("2006-01-02")
+}
+
+func currentWeeklySprintStart() string {
+	_, startsOn, _ := weeklySprintWindow(time.Now())
+	return startsOn
 }
 
 func activeSprintIDForBoard(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (string, bool, error) {

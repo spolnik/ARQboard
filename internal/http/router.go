@@ -39,7 +39,6 @@ type BoardStore interface {
 	GetBoard(context.Context, string) (db.Board, error)
 	CreateBoard(context.Context, db.CreateBoardParams) (db.Board, error)
 	CreateColumn(context.Context, db.CreateColumnParams) (db.Board, error)
-	UpdateColumn(context.Context, db.UpdateColumnParams) (db.Board, error)
 	CreateCard(context.Context, db.CreateCardParams) (db.BoardCard, error)
 	GetCardDetail(context.Context, string) (db.CardDetail, error)
 	UpdateCard(context.Context, db.UpdateCardParams) (db.BoardCard, error)
@@ -54,6 +53,12 @@ type BoardStore interface {
 	StartSprint(context.Context, string) (db.Sprint, error)
 	CompleteSprint(context.Context, db.CompleteSprintParams) (db.Sprint, error)
 	AssignCardToSprint(context.Context, db.AssignCardToSprintParams) (db.BoardCard, error)
+	GetRoadmapDashboard(context.Context, string) (db.RoadmapDashboard, error)
+	CreateEpic(context.Context, db.CreateEpicParams) (db.Epic, error)
+	UpdateEpic(context.Context, db.UpdateEpicParams) (db.Epic, error)
+	AssignCardToEpic(context.Context, db.AssignCardToEpicParams) (db.BoardCard, error)
+	CreateCardDependency(context.Context, db.CreateCardDependencyParams) (db.CardDependency, error)
+	DeleteCardDependency(context.Context, string) error
 }
 
 type AuthStore interface {
@@ -81,6 +86,8 @@ type AccessStore interface {
 	AuthorizeCard(context.Context, db.User, string, db.AccessLevel) error
 	AuthorizeSprint(context.Context, db.User, string, db.AccessLevel) error
 	AuthorizeWikiPage(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeEpic(context.Context, db.User, string, db.AccessLevel) error
+	AuthorizeCardDependency(context.Context, db.User, string, db.AccessLevel) error
 }
 
 type errorBody struct {
@@ -129,15 +136,20 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/sprints", createSprint(opts.BoardStore, opts.AccessStore))
 			r.Post("/sprints/{sprintID}/start", startSprint(opts.BoardStore, opts.AccessStore))
 			r.Post("/sprints/{sprintID}/complete", completeSprint(opts.BoardStore, opts.AccessStore))
-			r.Patch("/columns/{columnID}", updateColumn(opts.BoardStore, opts.AccessStore))
+			r.Get("/roadmap", roadmapDashboard(opts.BoardStore, opts.AccessStore))
+			r.Post("/epics", createEpic(opts.BoardStore, opts.AccessStore))
+			r.Patch("/epics/{epicID}", updateEpic(opts.BoardStore, opts.AccessStore))
 			r.Post("/cards", createCard(opts.BoardStore, opts.AccessStore))
 			r.Get("/cards/{cardID}", cardDetail(opts.BoardStore, opts.AccessStore))
 			r.Patch("/cards/{cardID}", updateCard(opts.BoardStore, opts.AccessStore))
 			r.Patch("/cards/{cardID}/sprint", assignCardToSprint(opts.BoardStore, opts.AccessStore))
+			r.Patch("/cards/{cardID}/epic", assignCardToEpic(opts.BoardStore, opts.AccessStore))
+			r.Post("/cards/{cardID}/dependencies", createCardDependency(opts.BoardStore, opts.AccessStore))
 			r.Patch("/cards/{cardID}/move", moveCard(opts.BoardStore, opts.AccessStore))
 			r.Post("/cards/{cardID}/move", moveCard(opts.BoardStore, opts.AccessStore))
 			r.Get("/cards/{cardID}/comments", cardComments(opts.BoardStore, opts.AccessStore))
 			r.Post("/cards/{cardID}/comments", createCardComment(opts.BoardStore, opts.AccessStore))
+			r.Delete("/card-dependencies/{dependencyID}", deleteCardDependency(opts.BoardStore, opts.AccessStore))
 			r.Get("/wiki", listWikiPages(opts.BoardStore, opts.AccessStore))
 			r.Post("/wiki", createWikiPage(opts.BoardStore, opts.AccessStore))
 			r.Get("/wiki/{pageID}", wikiPage(opts.BoardStore, opts.AccessStore))
@@ -221,6 +233,23 @@ type sprintRolloverRequest struct {
 
 type assignSprintRequest struct {
 	SprintID string `json:"sprintId"`
+}
+
+type epicRequest struct {
+	TeamID      string `json:"teamId"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	StartsOn    string `json:"startsOn"`
+	TargetOn    string `json:"targetOn"`
+}
+
+type assignEpicRequest struct {
+	EpicID string `json:"epicId"`
+}
+
+type cardDependencyRequest struct {
+	BlockerCardID string `json:"blockerCardId"`
 }
 
 type createCardCommentRequest struct {
@@ -729,10 +758,6 @@ func createSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 			return
 		}
-		if strings.TrimSpace(payload.Name) == "" {
-			writeError(w, http.StatusBadRequest, "invalid_sprint", "name is required")
-			return
-		}
 		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
 			if strings.TrimSpace(payload.TeamID) != "" {
 				return access.AuthorizeTeam(ctx, user, payload.TeamID, db.AccessManage)
@@ -823,39 +848,102 @@ func completeSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 	}
 }
 
-func updateColumn(store BoardStore, access AccessStore) http.HandlerFunc {
+func roadmapDashboard(store BoardStore, access AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
 			return
 		}
 
-		var payload columnRequest
+		teamID := strings.TrimSpace(r.URL.Query().Get("teamId"))
+		if teamID != "" {
+			if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+				return access.AuthorizeTeam(ctx, user, teamID, db.AccessRead)
+			}) {
+				return
+			}
+		}
+
+		dashboard, err := store.GetRoadmapDashboard(r.Context(), teamID)
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, dashboard)
+	}
+}
+
+func createEpic(store BoardStore, access AccessStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+
+		var payload epicRequest
 		if err := decodeJSON(w, r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 			return
 		}
-		if strings.TrimSpace(payload.Title) == "" {
-			writeError(w, http.StatusBadRequest, "invalid_column", "title is required")
+		if strings.TrimSpace(payload.TeamID) == "" || strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_epic", "teamId and title are required")
 			return
 		}
-
-		columnID := chi.URLParam(r, "columnID")
 		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
-			return access.AuthorizeColumn(ctx, user, columnID, db.AccessManage)
+			return access.AuthorizeTeam(ctx, user, payload.TeamID, db.AccessWrite)
 		}) {
 			return
 		}
-		board, err := store.UpdateColumn(r.Context(), db.UpdateColumnParams{
-			ColumnID: columnID,
-			Title:    payload.Title,
+		epic, err := store.CreateEpic(r.Context(), db.CreateEpicParams{
+			TeamID:      payload.TeamID,
+			Title:       payload.Title,
+			Description: payload.Description,
+			Status:      payload.Status,
+			StartsOn:    payload.StartsOn,
+			TargetOn:    payload.TargetOn,
 		})
 		if err != nil {
 			writeStoreError(w, r, err)
 			return
 		}
+		writeJSON(w, http.StatusCreated, epic)
+	}
+}
 
-		writeJSON(w, http.StatusOK, board)
+func updateEpic(store BoardStore, access AccessStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+		epicID := chi.URLParam(r, "epicID")
+		var payload epicRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_epic", "title is required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeEpic(ctx, user, epicID, db.AccessWrite)
+		}) {
+			return
+		}
+		epic, err := store.UpdateEpic(r.Context(), db.UpdateEpicParams{
+			EpicID:      epicID,
+			Title:       payload.Title,
+			Description: payload.Description,
+			Status:      payload.Status,
+			StartsOn:    payload.StartsOn,
+			TargetOn:    payload.TargetOn,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, epic)
 	}
 }
 
@@ -995,6 +1083,88 @@ func assignCardToSprint(store BoardStore, access AccessStore) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, card)
+	}
+}
+
+func assignCardToEpic(store BoardStore, access AccessStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+		cardID := chi.URLParam(r, "cardID")
+		var payload assignEpicRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessWrite)
+		}) {
+			return
+		}
+		card, err := store.AssignCardToEpic(r.Context(), db.AssignCardToEpicParams{
+			CardID: cardID,
+			EpicID: payload.EpicID,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, card)
+	}
+}
+
+func createCardDependency(store BoardStore, access AccessStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+		cardID := chi.URLParam(r, "cardID")
+		var payload cardDependencyRequest
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+			return
+		}
+		if strings.TrimSpace(payload.BlockerCardID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_dependency", "blockerCardId is required")
+			return
+		}
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCard(ctx, user, cardID, db.AccessWrite)
+		}) {
+			return
+		}
+		dependency, err := store.CreateCardDependency(r.Context(), db.CreateCardDependencyParams{
+			BlockedCardID: cardID,
+			BlockerCardID: payload.BlockerCardID,
+		})
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, dependency)
+	}
+}
+
+func deleteCardDependency(store BoardStore, access AccessStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "board store is unavailable")
+			return
+		}
+		dependencyID := chi.URLParam(r, "dependencyID")
+		if !authorizeRequest(w, r, access, func(ctx context.Context, user db.User) error {
+			return access.AuthorizeCardDependency(ctx, user, dependencyID, db.AccessWrite)
+		}) {
+			return
+		}
+		if err := store.DeleteCardDependency(r.Context(), dependencyID); err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

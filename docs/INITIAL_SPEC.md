@@ -169,6 +169,8 @@ board_members
 columns
 cards
 sprints
+epics
+card_dependencies
 card_comments
 activity_events
 wiki_pages
@@ -195,12 +197,14 @@ automation_rules
 - Initial admin user can be created by CLI.
 - OIDC login should be designed as a future addition, not required for the first skeleton.
 
-### Workspaces And Boards
+### Workspaces, Teams, And Boards
 
-- A workspace contains boards and members.
-- A board contains ordered columns and has at most one active sprint.
-- Columns contain ordered cards.
-- Sprints belong to a single board. Completing a sprint moves selected cards into a planned next sprint and returns the remaining cards to backlog.
+- A workspace contains members and teams.
+- Each team owns exactly one board. Creating a team provisions its team board automatically, and additional boards for the same team are rejected.
+- Board names, team names, and column names are display text only. Team, board, sprint, and column identity is held by UUIDs and stable system keys where needed.
+- A board contains ordered columns and cards. Default workflow columns have fixed product meaning; adding a column is admin functionality, while renaming workflow states is intentionally not exposed in the application UI.
+- Sprints belong to one team-owned board and are named from their ISO week, for example `Sprint 2026-W19`.
+- Creating a sprint from the current week auto-starts it when the team has no active sprint. Completing a sprint moves selected cards into a planned next sprint and returns the remaining cards to backlog.
 - V1 can assume one workspace per deployment if that simplifies the first implementation, but the schema should not block multiple workspaces later.
 
 ### Cards
@@ -222,6 +226,13 @@ Each card should support:
 - Cards have comments.
 - Important changes create activity events.
 - Activity events should be append-only.
+
+### Roadmap
+
+- Teams can group cards into epics.
+- Epics have UUID identity, display title, slug, description, status, start date, and target date.
+- Cards can have blocking dependencies on other cards in the same team.
+- Roadmap views should show epic progress, blocked work, and cards not yet assigned to an epic.
 
 ### Wiki Pages
 
@@ -252,7 +263,7 @@ Possible later features:
 
 Use JSON over HTTP under `/api`.
 
-Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, member assignees, labels, board filters, movement, sprint planning, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
+Current local baseline implements first-party login/logout for CLI-created admin users, protected workspace API routes, and the default-board slice with persisted cards, member assignees, labels, board filters, movement, sprint planning, roadmap epics, card dependencies, card detail updates, comments, activity events, and wiki page list/get/create/update endpoints. The same store path supports SQLite for zero-configuration local development and PostgreSQL for production-style deployments.
 
 Suggested endpoints:
 
@@ -288,6 +299,13 @@ POST   /api/sprints
 POST   /api/sprints/{sprintID}/start
 POST   /api/sprints/{sprintID}/complete
 
+GET    /api/roadmap?teamId={teamID}
+POST   /api/epics
+PATCH  /api/epics/{epicID}
+PATCH  /api/cards/{cardID}/epic
+POST   /api/cards/{cardID}/dependencies
+DELETE /api/card-dependencies/{dependencyID}
+
 GET    /api/wiki
 POST   /api/wiki
 GET    /api/wiki/{pageID}
@@ -308,6 +326,7 @@ Initial screens:
 - Workspace/board shell.
 - Kanban board.
 - Board filter toolbar for assignee, label, priority, due status, and text search.
+- Roadmap dashboard with epics, unassigned cards, and dependency mapping.
 - Planning dashboard.
 - Card detail drawer or modal.
 - Wiki page list.

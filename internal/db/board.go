@@ -54,6 +54,7 @@ type BoardCard struct {
 	BoardID       string      `json:"boardId"`
 	BoardName     string      `json:"boardName,omitempty"`
 	SprintID      string      `json:"sprintId,omitempty"`
+	EpicID        string      `json:"epicId,omitempty"`
 	Title         string      `json:"title"`
 	Description   string      `json:"description"`
 	Owner         string      `json:"owner"`
@@ -406,7 +407,7 @@ func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParam
 	}
 	teamID := strings.TrimSpace(params.TeamID)
 	if teamID == "" {
-		teamID, err = ensureDefaultTeam(ctx, tx, driver, workspaceID)
+		teamID, err = createTeamRecord(ctx, tx, driver, workspaceID, name, true)
 		if err != nil {
 			return Board{}, err
 		}
@@ -418,6 +419,11 @@ func (store BoardStore) CreateBoard(ctx context.Context, params CreateBoardParam
 		if teamWorkspaceID != workspaceID {
 			return Board{}, fmt.Errorf("%w: team must belong to the default workspace", ErrValidation)
 		}
+	}
+	if existingBoardID, found, err := boardIDForTeam(ctx, tx, driver, teamID); err != nil {
+		return Board{}, err
+	} else if found {
+		return Board{}, fmt.Errorf("%w: team already has board %s", ErrValidation, existingBoardID)
 	}
 	boardID, err := newID()
 	if err != nil {
@@ -1153,6 +1159,9 @@ func ensureBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID s
 	if err != nil {
 		return "", err
 	}
+	if id, found, err := boardIDForTeam(ctx, q, driver, teamID); err != nil || found {
+		return id, err
+	}
 	id, found, err := lookupID(ctx, q, driver, fmt.Sprintf(
 		"SELECT id FROM boards WHERE workspace_id = %s AND slug = %s",
 		placeholder(driver, 1),
@@ -1180,6 +1189,98 @@ func ensureBoard(ctx context.Context, q sqlQueryer, driver Driver, workspaceID s
 		placeholder(driver, 6),
 	), id, workspaceID, teamID, "Platform Board", "platform", "Default ARQboard workspace board.")
 	return id, err
+}
+
+func ensureBoardsForTeams(ctx context.Context, q sqlQueryer, driver Driver, workspaceID string) error {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM teams
+		WHERE workspace_id = %s
+		ORDER BY created_at, id
+	`, idText(driver, "id"), placeholder(driver, 1)), workspaceID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	teamIDs := make([]string, 0)
+	for rows.Next() {
+		var teamID string
+		if err := rows.Scan(&teamID); err != nil {
+			return err
+		}
+		teamIDs = append(teamIDs, teamID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, teamID := range teamIDs {
+		if _, err := ensureBoardForTeam(ctx, q, driver, teamID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureBoardForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return "", fmt.Errorf("%w: teamId is required", ErrValidation)
+	}
+	if boardID, found, err := boardIDForTeam(ctx, q, driver, teamID); err != nil || found {
+		return boardID, err
+	}
+
+	var workspaceID string
+	var teamName string
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT workspace_id, name
+		FROM teams
+		WHERE id = %s
+	`, placeholder(driver, 1)), teamID).Scan(&workspaceID, &teamName); err != nil {
+		return "", notFoundOrErr(err)
+	}
+
+	boardID, err := newID()
+	if err != nil {
+		return "", err
+	}
+	slug, err := uniqueBoardSlug(ctx, q, driver, workspaceID, slugify(teamName))
+	if err != nil {
+		return "", err
+	}
+	_, err = q.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO boards (id, workspace_id, team_id, name, slug, description)
+		VALUES (%s, %s, %s, %s, %s, %s)
+	`,
+		placeholder(driver, 1),
+		placeholder(driver, 2),
+		placeholder(driver, 3),
+		placeholder(driver, 4),
+		placeholder(driver, 5),
+		placeholder(driver, 6),
+	), boardID, workspaceID, teamID, strings.TrimSpace(teamName), slug, "Team-owned board.")
+	if err != nil {
+		if isUniqueViolation(err) {
+			return "", fmt.Errorf("%w: team already has a board", ErrValidation)
+		}
+		return "", err
+	}
+	if _, err := ensureColumns(ctx, q, driver, boardID); err != nil {
+		return "", err
+	}
+	return boardID, nil
+}
+
+func boardIDForTeam(ctx context.Context, q sqlQueryer, driver Driver, teamID string) (string, bool, error) {
+	return lookupID(ctx, q, driver, fmt.Sprintf(`
+		SELECT id
+		FROM boards
+		WHERE team_id = %s
+		ORDER BY created_at, id
+		LIMIT 1
+	`, placeholder(driver, 1)), teamID)
 }
 
 func ensureColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID string) (map[string]string, error) {
@@ -1443,7 +1544,7 @@ func loadColumns(ctx context.Context, q sqlQueryer, driver Driver, boardID strin
 
 func loadCardsByColumn(ctx context.Context, q sqlQueryer, driver Driver, boardID string, sprintID string) (map[string][]BoardCard, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
-		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.epic_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
 			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
 		LEFT JOIN users ON users.id = cards.assignee_id
@@ -1590,7 +1691,7 @@ func loadCardActivity(ctx context.Context, q sqlQueryer, driver Driver, cardID s
 
 func loadCard(ctx context.Context, q sqlQueryer, driver Driver, cardID string) (BoardCard, error) {
 	row := q.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
+		SELECT cards.id, cards.column_id, %s, COALESCE((SELECT boards.name FROM boards WHERE boards.id = cards.board_id), ''), cards.sprint_id, cards.epic_id, cards.title, cards.description, cards.owner_initials, cards.priority, cards.position, %s,
 			COALESCE(%s, ''), COALESCE(users.display_name, ''), COALESCE(users.email, '')
 		FROM cards
 		LEFT JOIN users ON users.id = cards.assignee_id
@@ -1675,6 +1776,7 @@ func scanCard(scanner cardScanner) (BoardCard, error) {
 	var card BoardCard
 	var priority string
 	var sprintID sql.NullString
+	var epicID sql.NullString
 	var assigneeID sql.NullString
 	var assigneeName sql.NullString
 	var assigneeEmail sql.NullString
@@ -1684,6 +1786,7 @@ func scanCard(scanner cardScanner) (BoardCard, error) {
 		&card.BoardID,
 		&card.BoardName,
 		&sprintID,
+		&epicID,
 		&card.Title,
 		&card.Description,
 		&card.Owner,
@@ -1697,6 +1800,7 @@ func scanCard(scanner cardScanner) (BoardCard, error) {
 		return BoardCard{}, err
 	}
 	card.SprintID = sprintID.String
+	card.EpicID = epicID.String
 	card.AssigneeID = assigneeID.String
 	card.AssigneeName = assigneeName.String
 	card.AssigneeEmail = assigneeEmail.String

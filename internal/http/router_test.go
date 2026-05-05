@@ -194,15 +194,8 @@ func TestRouterListsCreatesLoadsBoardsAndColumns(t *testing.T) {
 
 	rename := httptest.NewRecorder()
 	router.ServeHTTP(rename, httptest.NewRequest(http.MethodPatch, "/api/columns/column-planned", bytes.NewBufferString(`{"title":"Backlog"}`)))
-	if rename.Code != http.StatusOK {
-		t.Fatalf("rename column status = %d, want %d", rename.Code, http.StatusOK)
-	}
-	var renamedBoard db.Board
-	if err := json.NewDecoder(rename.Body).Decode(&renamedBoard); err != nil {
-		t.Fatalf("Decode rename returned error: %v", err)
-	}
-	if renamedBoard.Columns[0].Title != "Backlog" {
-		t.Fatalf("renamed column = %q, want Backlog", renamedBoard.Columns[0].Title)
+	if rename.Code != http.StatusNotFound {
+		t.Fatalf("rename column status = %d, want %d", rename.Code, http.StatusNotFound)
 	}
 }
 
@@ -491,6 +484,93 @@ func TestRouterAuthorizesRoleScopedWrites(t *testing.T) {
 	}
 	if allowedAccess.lastColumnID != "column-1" || allowedAccess.lastLevel != db.AccessWrite {
 		t.Fatalf("access check = (%q, %q), want column-1 write", allowedAccess.lastColumnID, allowedAccess.lastLevel)
+	}
+}
+
+func TestRouterManagesRoadmapEpicsAndDependencies(t *testing.T) {
+	user := testUser()
+	user.IsAdmin = false
+	access := &fakeAccessStore{}
+	store := fakeBoardStore{
+		roadmap: db.RoadmapDashboard{
+			TeamID:   "team-1",
+			TeamName: "Platform Engineering",
+			Epics: []db.RoadmapEpic{{
+				Epic:       db.Epic{ID: "epic-1", TeamID: "team-1", Title: "Roadmap"},
+				TotalCards: 1,
+			}},
+		},
+		epic:       db.Epic{ID: "epic-1", TeamID: "team-1", Title: "Roadmap"},
+		assigned:   db.BoardCard{ID: "card-1", EpicID: "epic-1", Title: "Assigned"},
+		dependency: db.CardDependency{ID: "dependency-1", BlockedCardID: "card-1", BlockerCardID: "card-2"},
+	}
+	router := NewRouter(Options{
+		AuthStore:   &fakeAuthStore{user: user},
+		AccessStore: access,
+		BoardStore:  store,
+	})
+
+	list := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/roadmap?teamId=team-1", nil)
+	listReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(list, listReq)
+	if list.Code != http.StatusOK {
+		t.Fatalf("roadmap status = %d, want %d", list.Code, http.StatusOK)
+	}
+	if access.lastTeamID != "team-1" || access.lastLevel != db.AccessRead {
+		t.Fatalf("roadmap access = (%q, %v), want team read", access.lastTeamID, access.lastLevel)
+	}
+
+	create := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/epics", bytes.NewBufferString(`{"teamId":"team-1","title":"Roadmap","description":"Plan","status":"active","startsOn":"2026-05-04","targetOn":"2026-05-12"}`))
+	createReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(create, createReq)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create epic status = %d, want %d", create.Code, http.StatusCreated)
+	}
+	if access.lastTeamID != "team-1" || access.lastLevel != db.AccessWrite {
+		t.Fatalf("create epic access = (%q, %v), want team write", access.lastTeamID, access.lastLevel)
+	}
+
+	update := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/epics/epic-1", bytes.NewBufferString(`{"title":"Roadmap updated","description":"Plan","status":"done","startsOn":"2026-05-05","targetOn":"2026-05-20"}`))
+	updateReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(update, updateReq)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update epic status = %d, want %d", update.Code, http.StatusOK)
+	}
+	if access.lastEpicID != "epic-1" || access.lastLevel != db.AccessWrite {
+		t.Fatalf("update epic access = (%q, %v), want epic write", access.lastEpicID, access.lastLevel)
+	}
+
+	assign := httptest.NewRecorder()
+	assignReq := httptest.NewRequest(http.MethodPatch, "/api/cards/card-1/epic", bytes.NewBufferString(`{"epicId":"epic-1"}`))
+	assignReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(assign, assignReq)
+	if assign.Code != http.StatusOK {
+		t.Fatalf("assign epic status = %d, want %d", assign.Code, http.StatusOK)
+	}
+	if access.lastCardID != "card-1" || access.lastLevel != db.AccessWrite {
+		t.Fatalf("assign access = (%q, %v), want card write", access.lastCardID, access.lastLevel)
+	}
+
+	dependency := httptest.NewRecorder()
+	dependencyReq := httptest.NewRequest(http.MethodPost, "/api/cards/card-1/dependencies", bytes.NewBufferString(`{"blockerCardId":"card-2"}`))
+	dependencyReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(dependency, dependencyReq)
+	if dependency.Code != http.StatusCreated {
+		t.Fatalf("dependency status = %d, want %d", dependency.Code, http.StatusCreated)
+	}
+
+	remove := httptest.NewRecorder()
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/card-dependencies/dependency-1", nil)
+	removeReq.AddCookie(&http.Cookie{Name: "arqboard_session", Value: "token-123"})
+	router.ServeHTTP(remove, removeReq)
+	if remove.Code != http.StatusNoContent {
+		t.Fatalf("delete dependency status = %d, want %d", remove.Code, http.StatusNoContent)
+	}
+	if access.lastDependencyID != "dependency-1" || access.lastLevel != db.AccessWrite {
+		t.Fatalf("delete dependency access = (%q, %v), want dependency write", access.lastDependencyID, access.lastLevel)
 	}
 }
 
@@ -955,8 +1035,6 @@ func TestRouterValidatesWritePayloads(t *testing.T) {
 		{name: "create board bad json", method: http.MethodPost, path: "/api/boards", body: `{`},
 		{name: "create column missing title", method: http.MethodPost, path: "/api/boards/board-1/columns", body: `{}`},
 		{name: "create column bad json", method: http.MethodPost, path: "/api/boards/board-1/columns", body: `{`},
-		{name: "rename column missing title", method: http.MethodPatch, path: "/api/columns/column-1", body: `{}`},
-		{name: "rename column bad json", method: http.MethodPatch, path: "/api/columns/column-1", body: `{`},
 		{name: "comment missing body", method: http.MethodPost, path: "/api/cards/card-1/comments", body: `{}`},
 		{name: "comment bad json", method: http.MethodPost, path: "/api/cards/card-1/comments", body: `{`},
 		{name: "create wiki missing title", method: http.MethodPost, path: "/api/wiki", body: `{"bodyMarkdown":"Body"}`},
@@ -1170,7 +1248,7 @@ func TestRouterManagesSprintPlanning(t *testing.T) {
 	}
 
 	create := httptest.NewRecorder()
-	router.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/sprints", bytes.NewBufferString(`{"boardId":"board-1","name":"Sprint 2026-05 Platform","goal":"Ship planning foundations","startsOn":"2026-05-04","endsOn":"2026-05-15"}`)))
+	router.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/sprints", bytes.NewBufferString(`{"teamId":"team-1","startsOn":"2026-05-04"}`)))
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create sprint status = %d, want %d", create.Code, http.StatusCreated)
 	}
@@ -1211,7 +1289,6 @@ func TestRouterValidatesSprintPlanningPayloads(t *testing.T) {
 		body   string
 	}{
 		{name: "create sprint bad json", method: http.MethodPost, path: "/api/sprints", body: `{`},
-		{name: "create sprint missing name", method: http.MethodPost, path: "/api/sprints", body: `{"boardId":"board-1"}`},
 		{name: "complete sprint bad json", method: http.MethodPost, path: "/api/sprints/sprint-1/complete", body: `{`},
 		{name: "assign card to sprint bad json", method: http.MethodPatch, path: "/api/cards/card-1/sprint", body: `{`},
 	}
@@ -1242,6 +1319,9 @@ type fakeBoardStore struct {
 	started    db.Sprint
 	completed  db.Sprint
 	assigned   db.BoardCard
+	roadmap    db.RoadmapDashboard
+	epic       db.Epic
+	dependency db.CardDependency
 	err        error
 }
 
@@ -1267,18 +1347,20 @@ type fakeTeamStore struct {
 }
 
 type fakeAccessStore struct {
-	teams        []db.Team
-	boards       []db.BoardSummary
-	wikiPages    []db.WikiPage
-	err          error
-	lastUser     db.User
-	lastTeamID   string
-	lastBoardID  string
-	lastColumnID string
-	lastCardID   string
-	lastSprintID string
-	lastPageID   string
-	lastLevel    db.AccessLevel
+	teams            []db.Team
+	boards           []db.BoardSummary
+	wikiPages        []db.WikiPage
+	err              error
+	lastUser         db.User
+	lastTeamID       string
+	lastBoardID      string
+	lastColumnID     string
+	lastCardID       string
+	lastSprintID     string
+	lastPageID       string
+	lastEpicID       string
+	lastDependencyID string
+	lastLevel        db.AccessLevel
 }
 
 func (store *fakeAuthStore) Login(_ context.Context, _ db.LoginParams) (db.LoginSession, error) {
@@ -1415,6 +1497,20 @@ func (store *fakeAccessStore) AuthorizeSprint(_ context.Context, user db.User, s
 func (store *fakeAccessStore) AuthorizeWikiPage(_ context.Context, user db.User, pageID string, level db.AccessLevel) error {
 	store.lastUser = user
 	store.lastPageID = pageID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeEpic(_ context.Context, user db.User, epicID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastEpicID = epicID
+	store.lastLevel = level
+	return store.err
+}
+
+func (store *fakeAccessStore) AuthorizeCardDependency(_ context.Context, user db.User, dependencyID string, level db.AccessLevel) error {
+	store.lastUser = user
+	store.lastDependencyID = dependencyID
 	store.lastLevel = level
 	return store.err
 }
@@ -1567,6 +1663,45 @@ func (store fakeBoardStore) AssignCardToSprint(_ context.Context, _ db.AssignCar
 		return db.BoardCard{}, store.err
 	}
 	return store.assigned, nil
+}
+
+func (store fakeBoardStore) GetRoadmapDashboard(context.Context, string) (db.RoadmapDashboard, error) {
+	if store.err != nil {
+		return db.RoadmapDashboard{}, store.err
+	}
+	return store.roadmap, nil
+}
+
+func (store fakeBoardStore) CreateEpic(context.Context, db.CreateEpicParams) (db.Epic, error) {
+	if store.err != nil {
+		return db.Epic{}, store.err
+	}
+	return store.epic, nil
+}
+
+func (store fakeBoardStore) UpdateEpic(context.Context, db.UpdateEpicParams) (db.Epic, error) {
+	if store.err != nil {
+		return db.Epic{}, store.err
+	}
+	return store.epic, nil
+}
+
+func (store fakeBoardStore) AssignCardToEpic(context.Context, db.AssignCardToEpicParams) (db.BoardCard, error) {
+	if store.err != nil {
+		return db.BoardCard{}, store.err
+	}
+	return store.assigned, nil
+}
+
+func (store fakeBoardStore) CreateCardDependency(context.Context, db.CreateCardDependencyParams) (db.CardDependency, error) {
+	if store.err != nil {
+		return db.CardDependency{}, store.err
+	}
+	return store.dependency, nil
+}
+
+func (store fakeBoardStore) DeleteCardDependency(context.Context, string) error {
+	return store.err
 }
 
 func testUser() db.User {

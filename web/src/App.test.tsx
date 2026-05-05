@@ -7,16 +7,24 @@ import App, {
   columnAccent,
   defaultAssigneeId,
   dueStatus,
+  epicStatusClass,
+  epicStatusLabel,
+  epicWindow,
   addSprintToDashboard,
   assignCardInDashboard,
   completeSprintInDashboard,
   hasActiveBoardFilters,
   normalizeCard,
   normalizePlanningDashboard,
+  normalizeRoadmapDashboard,
   resolveDragMoveTarget,
   resolveMoveTarget,
   resolvePlanningMoveTarget,
+  resolveRoadmapMoveTarget,
+  roadmapRiskClass,
+  roadmapRiskLabel,
   sortCards,
+  sprintWeekRange,
   sortSprintPlans,
   sprintSortKey,
   sprintStatusDisplay,
@@ -27,9 +35,12 @@ import App, {
   canWriteTeam,
   teamRoleForUser,
   addCardToBoard,
+  assignCardInRoadmap,
   findPlanningCard,
   replaceCardInBoard,
   selectedCardIdForBoard,
+  upsertDependencyInRoadmap,
+  upsertEpicInRoadmap,
   upsertWikiPageInBoard,
 } from './App';
 
@@ -170,7 +181,7 @@ const boardSummaries = [
   {
     id: 'board-release',
     workspaceId: 'workspace-1',
-    teamId: 'team-platform',
+    teamId: 'team-release',
     name: 'Release Train',
     slug: 'release-train',
     columnCount: 4,
@@ -356,11 +367,11 @@ const sprintFixture = {
   workspaceId: 'workspace-1',
   teamId: 'team-platform',
   boardId: 'board-1',
-  name: 'Sprint 2026-05 Platform',
+  name: 'Sprint 2026-W19',
   goal: 'Ship planning foundations',
   status: 'planned',
   startsOn: '2026-05-04',
-  endsOn: '2026-05-15',
+  endsOn: '2026-05-10',
 };
 
 const activeSprintFixture = {
@@ -372,7 +383,7 @@ const activeSprintFixture = {
 const completedSprintFixture = {
   ...activeSprintFixture,
   status: 'completed',
-  completedAt: '2026-05-15T16:00:00Z',
+  completedAt: '2026-05-10T16:00:00Z',
 };
 
 const planningDashboardFixture = {
@@ -383,6 +394,71 @@ const planningDashboardFixture = {
   backlog: [boardFixture.columns[0].cards[0]],
   plannedSprints: [],
   completedSprints: [],
+};
+
+const roadmapEpicFixture = {
+  id: 'epic-1',
+  workspaceId: 'workspace-1',
+  teamId: 'team-platform',
+  title: 'Identity foundations',
+  slug: 'identity-foundations',
+  description: 'Login, session, and access boundaries.',
+  status: 'active' as const,
+  startsOn: '2026-05-04',
+  targetOn: '2026-05-29',
+};
+
+const createdEpicFixture = {
+  id: 'epic-2',
+  workspaceId: 'workspace-1',
+  teamId: 'team-platform',
+  title: 'Roadmap hardening',
+  slug: 'roadmap-hardening',
+  description: 'Make roadmap planning usable for the team.',
+  status: 'planned' as const,
+  startsOn: '2026-06-01',
+  targetOn: '2026-06-19',
+};
+
+const createdDependencyFixture = {
+  id: 'dependency-created',
+  blockedCardId: 'card-1',
+  blockedTitle: 'Wire auth session cookie flow',
+  blockerCardId: 'card-2',
+  blockerTitle: 'Ready for review API shape',
+  relationType: 'blocks',
+};
+
+const roadmapDashboardFixture = {
+  teamId: 'team-platform',
+  teamName: 'Platform Engineering',
+  epics: [
+    {
+      epic: roadmapEpicFixture,
+      cards: [
+        {
+          card: { ...boardFixture.columns[1].cards[0], epicId: 'epic-1' },
+          columnTitle: 'In progress',
+          blockedBy: [],
+          blocking: [],
+        },
+      ],
+      totalCards: 1,
+      completedCards: 0,
+      blockedCards: 0,
+      progress: 0,
+      risk: 'on_track',
+    },
+  ],
+  unassignedCards: [
+    {
+      card: { ...boardFixture.columns[0].cards[0], epicId: '' },
+      columnTitle: 'Planned',
+      blockedBy: [],
+      blocking: [],
+    },
+  ],
+  dependencies: [],
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -406,7 +482,12 @@ function dateOffset(days: number) {
   return `${year}-${month}-${day}`;
 }
 
-function stubRoleWorkspace(user: typeof userFixture, team: (typeof teamsFixture)[number], planningResponse: unknown = planningDashboardFixture) {
+function stubRoleWorkspace(
+  user: typeof userFixture,
+  team: (typeof teamsFixture)[number],
+  planningResponse: unknown = planningDashboardFixture,
+  roadmapResponse: unknown = roadmapDashboardFixture,
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -426,6 +507,9 @@ function stubRoleWorkspace(user: typeof userFixture, team: (typeof teamsFixture)
       if (url === '/api/planning?teamId=team-platform') {
         return jsonResponse(planningResponse);
       }
+      if (url === '/api/roadmap?teamId=team-platform') {
+        return jsonResponse(roadmapResponse);
+      }
 
       throw new Error(`Unexpected fetch GET ${url}`);
     }),
@@ -435,6 +519,7 @@ function stubRoleWorkspace(user: typeof userFixture, team: (typeof teamsFixture)
 describe('App', () => {
   beforeEach(() => {
     let planningResponse: unknown = planningDashboardFixture;
+    let roadmapResponse: unknown = roadmapDashboardFixture;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -526,8 +611,27 @@ describe('App', () => {
         if (url === '/api/planning?teamId=team-platform') {
           return jsonResponse(planningResponse);
         }
+        if (url === '/api/roadmap?teamId=team-platform') {
+          return jsonResponse(roadmapResponse);
+        }
+        if (url === '/api/epics' && init?.method === 'POST') {
+          roadmapResponse = {
+            ...(roadmapResponse as typeof roadmapDashboardFixture),
+            epics: [...(roadmapResponse as typeof roadmapDashboardFixture).epics, { epic: createdEpicFixture, cards: [], totalCards: 0, completedCards: 0, blockedCards: 0, progress: 0, risk: 'on_track' }],
+          };
+          return jsonResponse(createdEpicFixture, 201);
+        }
+        if (url === '/api/cards/card-1/epic' && init?.method === 'PATCH') {
+          return jsonResponse({ ...boardFixture.columns[0].cards[0], epicId: 'epic-1' });
+        }
+        if (url === '/api/cards/card-1/dependencies' && init?.method === 'POST') {
+          return jsonResponse(createdDependencyFixture, 201);
+        }
+        if (url === '/api/card-dependencies/dependency-created' && init?.method === 'DELETE') {
+          return new Response(null, { status: 204 });
+        }
         if (url === '/api/sprints' && init?.method === 'POST') {
-          return jsonResponse(sprintFixture, 201);
+          return jsonResponse(activeSprintFixture, 201);
         }
         if (url === '/api/cards/card-1/sprint' && init?.method === 'PATCH') {
           return jsonResponse({ ...boardFixture.columns[0].cards[0], sprintId: 'sprint-1' });
@@ -689,6 +793,37 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByText(/could not load the board/i)).toBeInTheDocument();
+  });
+
+  it('shows a helpful error when sprint planning cannot load', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/me') {
+          return jsonResponse(userFixture);
+        }
+        if (url === '/api/boards') {
+          return jsonResponse(boardSummaries);
+        }
+        if (url === '/api/teams') {
+          return jsonResponse(teamsFixture);
+        }
+        if (url === '/api/boards/board-1') {
+          return jsonResponse(boardFixture);
+        }
+        if (url === '/api/planning?teamId=team-platform') {
+          return jsonResponse({ error: { code: 'not_ready' } }, 500);
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+    await clickPrimaryNavButton(/planning/i);
+
+    expect(await screen.findByText(/could not load planning dashboard/i)).toBeInTheDocument();
+    expect(screen.getByText(/backlog is clear/i)).toBeInTheDocument();
   });
 
   it('renders low-priority cards distinctly', async () => {
@@ -937,40 +1072,13 @@ describe('App', () => {
     expect(await screen.findByText(/this board has no columns/i)).toBeInTheDocument();
   });
 
-  it('switches between boards from the board selector', async () => {
+  it('uses the selected team as the board context', async () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Board'), {
-      target: { value: 'board-release' },
-    });
-
-    expect(await screen.findByRole('heading', { name: /release train/i })).toBeInTheDocument();
-    expect(screen.getAllByText('No matches').length).toBeGreaterThan(0);
-    expect(fetch).toHaveBeenCalledWith('/api/boards/board-release');
-  });
-
-  it('creates a new board and selects it', async () => {
-    render(<App />);
-
-    await clickPrimaryNavButton(/settings/i);
-    fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
-    fireEvent.change(screen.getByLabelText(/board name/i), {
-      target: { value: 'Security Backlog' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /create board/i }));
-
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        '/api/boards',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ name: 'Security Backlog', teamId: 'team-platform' }),
-        }),
-      ),
-    );
-    expect(await screen.findByRole('heading', { name: /security backlog/i })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /create board/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Board')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Team')).toHaveValue('team-platform');
+    expect(screen.getByText(/team board/i)).toHaveTextContent('Platform Board');
   });
 
   it('creates teams and assigns workspace members to a team', async () => {
@@ -1010,7 +1118,7 @@ describe('App', () => {
     expect(await screen.findByText(/member assigned to team/i)).toBeInTheDocument();
   });
 
-  it('adds and renames board columns', async () => {
+  it('adds board columns but keeps existing column names fixed', async () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: /platform board/i })).toBeInTheDocument();
@@ -1019,6 +1127,11 @@ describe('App', () => {
 
     await clickPrimaryNavButton(/settings/i);
     fireEvent.click(await screen.findByRole('button', { name: /add column/i }));
+    expect(screen.getByRole('dialog', { name: /add column/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    expect(screen.queryByRole('dialog', { name: /add column/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /add column/i }));
     fireEvent.change(screen.getByLabelText(/column title/i), {
       target: { value: 'Blocked' },
     });
@@ -1035,22 +1148,8 @@ describe('App', () => {
     );
     expect(screen.getByText('Blocked')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /rename planned/i }));
-    fireEvent.change(screen.getByLabelText(/column title/i), {
-      target: { value: 'Backlog' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /save column/i }));
-
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        '/api/columns/column-planned',
-        expect.objectContaining({
-          method: 'PATCH',
-          body: JSON.stringify({ title: 'Backlog' }),
-        }),
-      ),
-    );
-    expect(screen.getByText('Backlog')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /rename planned/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /rename column/i })).not.toBeInTheDocument();
   });
 
   it('keeps the workspace usable when no boards exist yet', async () => {
@@ -1074,7 +1173,7 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: /loading board/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /no boards/i })).toBeInTheDocument();
+    expect(screen.getByText(/team board: no board/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /new card/i })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /open add column/i })).not.toBeInTheDocument();
     await clickPrimaryNavButton(/settings/i);
@@ -1108,9 +1207,6 @@ describe('App', () => {
       if (url === '/api/me') {
         return jsonResponse(userFixture);
       }
-      if (url === '/api/boards' && init?.method === 'POST') {
-        return jsonResponse({ error: { code: 'unavailable' } }, 500);
-      }
       if (url === '/api/boards') {
         return jsonResponse(boardSummaries);
       }
@@ -1126,9 +1222,6 @@ describe('App', () => {
       if (url === '/api/boards/board-1/columns' && init?.method === 'POST') {
         return jsonResponse({ error: { code: 'unavailable' } }, 500);
       }
-      if (url === '/api/columns/column-planned' && init?.method === 'PATCH') {
-        return jsonResponse({ error: { code: 'unavailable' } }, 500);
-      }
       throw new Error(`Unexpected fetch ${init?.method ?? 'GET'} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -1136,29 +1229,12 @@ describe('App', () => {
     render(<App />);
 
     await clickPrimaryNavButton(/settings/i);
-    fireEvent.click(await screen.findByRole('button', { name: /new board/i }));
-    fireEvent.change(screen.getByLabelText(/board name/i), {
-      target: { value: 'Security Backlog' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /create board/i }));
-    expect(await screen.findByText(/could not create the board/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    await clickPrimaryNavButton(/settings/i);
     fireEvent.click(screen.getByRole('button', { name: /add column/i }));
     fireEvent.change(screen.getByLabelText(/column title/i), {
       target: { value: 'Blocked' },
     });
     fireEvent.click(screen.getByRole('button', { name: /^add column$/i }));
     expect(await screen.findByText(/could not add the column/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    fireEvent.click(screen.getByRole('button', { name: /rename planned/i }));
-    fireEvent.change(screen.getByLabelText(/column title/i), {
-      target: { value: 'Backlog' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /save column/i }));
-    expect(await screen.findByText(/could not rename the column/i)).toBeInTheDocument();
   });
 
   it('shows errors when card management requests fail', async () => {
@@ -1439,6 +1515,68 @@ describe('App', () => {
     expect(resolvePlanningMoveTarget('card-1', 'planning-sprint:sprint-1')).toBeNull();
   });
 
+  it('normalizes and updates roadmap dashboard state', () => {
+    type DashboardArg = Parameters<typeof normalizeRoadmapDashboard>[0];
+    type CardArg = Parameters<typeof normalizeCard>[0];
+    const dashboard = normalizeRoadmapDashboard({
+      ...roadmapDashboardFixture,
+      dependencies: [createdDependencyFixture],
+      unassignedCards: [{ ...roadmapDashboardFixture.unassignedCards[0], blockedBy: [createdDependencyFixture] }],
+    } as DashboardArg);
+    const card = { ...(boardFixture.columns[0].cards[0] as CardArg), epicId: 'epic-1' };
+
+    expect(resolveRoadmapMoveTarget('roadmap-card:card-1', 'roadmap-epic:epic-1')).toEqual({ cardId: 'card-1', epicId: 'epic-1' });
+    expect(resolveRoadmapMoveTarget('roadmap-card:card-1', 'roadmap-unassigned')).toEqual({ cardId: 'card-1', epicId: '' });
+    expect(resolveRoadmapMoveTarget('card-1', 'roadmap-epic:epic-1')).toBeNull();
+
+    expect(normalizeRoadmapDashboard({} as DashboardArg)).toMatchObject({ teamId: '', teamName: '', epics: [], unassignedCards: [], dependencies: [] });
+    expect(upsertEpicInRoadmap(dashboard, createdEpicFixture).epics.map((plan) => plan.epic.id)).toContain('epic-2');
+    expect(upsertEpicInRoadmap(dashboard, { ...roadmapEpicFixture, title: 'Identity foundations updated' }).epics[0].epic.title).toBe(
+      'Identity foundations updated',
+    );
+    expect(assignCardInRoadmap(dashboard, card).epics[0].cards.some((candidate) => candidate.card.id === 'card-1')).toBe(true);
+    expect(assignCardInRoadmap(dashboard, { ...card, epicId: '' }).unassignedCards.some((candidate) => candidate.card.id === 'card-1')).toBe(true);
+
+    const unknownCardDependency = {
+      ...createdDependencyFixture,
+      id: 'dependency-unknown',
+      blockedCardId: 'card-unknown',
+      blockedTitle: 'Unknown card',
+    };
+    const unknownCardDashboard = normalizeRoadmapDashboard({ ...roadmapDashboardFixture, dependencies: [unknownCardDependency] } as DashboardArg);
+    const unknownCard = { ...(boardFixture.columns[0].cards[0] as CardArg), id: 'card-unknown', title: 'Unknown card', epicId: '' };
+    expect(assignCardInRoadmap(unknownCardDashboard, unknownCard).unassignedCards.find((candidate) => candidate.card.id === 'card-unknown')?.blockedBy[0].id).toBe(
+      'dependency-unknown',
+    );
+
+    const doneDashboard = normalizeRoadmapDashboard({
+      ...roadmapDashboardFixture,
+      epics: [
+        {
+          ...roadmapDashboardFixture.epics[0],
+          cards: [{ ...roadmapDashboardFixture.epics[0].cards[0], columnTitle: 'Done' }],
+        },
+      ],
+    } as DashboardArg);
+    expect(assignCardInRoadmap(doneDashboard, { ...(boardFixture.columns[1].cards[0] as CardArg), epicId: 'epic-1' }).epics[0]).toMatchObject({
+      progress: 100,
+      risk: 'complete',
+    });
+
+    const withoutDependency = upsertDependencyInRoadmap(dashboard, createdDependencyFixture, 'remove');
+    expect(withoutDependency.dependencies).toHaveLength(0);
+    expect(upsertDependencyInRoadmap(withoutDependency, createdDependencyFixture).unassignedCards[0].blockedBy[0].id).toBe('dependency-created');
+    expect(
+      upsertDependencyInRoadmap(
+        {
+          ...withoutDependency,
+          dependencies: [{ ...createdDependencyFixture, id: 'dependency-z' }],
+        },
+        { ...createdDependencyFixture, id: 'dependency-a' },
+      ).dependencies.map((dependency) => dependency.id),
+    ).toEqual(['dependency-a', 'dependency-z']);
+  });
+
   it('formats sprint windows for complete and partial date ranges', () => {
     const baseSprint = {
       id: 'sprint-window',
@@ -1456,6 +1594,12 @@ describe('App', () => {
     expect(sprintWindow({ ...baseSprint, startsOn: '2026-05-01' })).toBe('Starts 2026-05-01');
     expect(sprintWindow({ ...baseSprint, endsOn: '2026-05-15' })).toBe('Ends 2026-05-15');
     expect(sprintWindow(baseSprint)).toBe('Dates not set');
+    expect(sprintWeekRange('2026-W19')).toEqual({ startsOn: '2026-05-04', endsOn: '2026-05-10' });
+    expect(sprintWeekRange('not-a-week')).toBeNull();
+    expect(sprintWeekRange('2026-W54')).toBeNull();
+    expect(epicWindow({ ...roadmapEpicFixture, targetOn: '' })).toBe('Starts 2026-05-04');
+    expect(epicWindow({ ...roadmapEpicFixture, startsOn: '' })).toBe('Targets 2026-05-29');
+    expect(epicWindow({ ...roadmapEpicFixture, startsOn: '', targetOn: '' })).toBe('Dates not set');
   });
 
   it('normalizes and updates planning dashboard state', () => {
@@ -1489,6 +1633,8 @@ describe('App', () => {
     const added = addSprintToDashboard(dashboard, { ...plannedSprint, id: 'sprint-2', name: 'Sprint 2026-06 Platform', startsOn: '2026-06-01' });
     expect(added.plannedSprints.map((plan) => plan.sprint.id)).toContain('sprint-2');
     expect(addSprintToDashboard(added, { ...plannedSprint, goal: 'Updated goal' }).plannedSprints.find((plan) => plan.sprint.id === 'sprint-1')?.sprint.goal).toBe('Updated goal');
+    expect(addSprintToDashboard(dashboard, activeSprint).activeSprint?.sprint.id).toBe(activeSprint.id);
+    expect(addSprintToDashboard(dashboard, completedSprintBase).completedSprints[0].sprint.status).toBe('completed');
 
     const assignedToPlanned = assignCardInDashboard(dashboard, { ...planningCard, sprintId: 'sprint-1' });
     expect(assignedToPlanned.backlog).toHaveLength(0);
@@ -1593,6 +1739,22 @@ describe('App', () => {
     expect(sprintStatusDisplay('completed').label).toBe('Completed');
   });
 
+  it('labels roadmap epic statuses and risk states', () => {
+    expect(epicStatusLabel('planned')).toBe('Planned');
+    expect(epicStatusLabel('active')).toBe('Active');
+    expect(epicStatusLabel('done')).toBe('Done');
+    expect(epicStatusClass('planned')).toContain('slate');
+    expect(epicStatusClass('active')).toContain('emerald');
+    expect(epicStatusClass('done')).toContain('slate');
+
+    expect(roadmapRiskLabel('on_track')).toBe('On track');
+    expect(roadmapRiskLabel('blocked')).toBe('Blocked');
+    expect(roadmapRiskLabel('complete')).toBe('Complete');
+    expect(roadmapRiskClass('on_track')).toContain('sky');
+    expect(roadmapRiskClass('blocked')).toContain('rose');
+    expect(roadmapRiskClass('complete')).toContain('emerald');
+  });
+
   it('classifies due dates and card display helpers', () => {
     expect(dueStatus('').label).toBe('date missing');
     expect(dueStatus(dateOffset(-1)).label).toBe('overdue');
@@ -1671,9 +1833,9 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: /new wiki page/i })).not.toBeInTheDocument();
 
     await clickPrimaryNavButton(/planning/i);
-    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-05 platform/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /create sprint/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /start sprint 2026-05 platform/i })).not.toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-w19/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create weekly sprint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start sprint 2026-w19/i })).not.toBeInTheDocument();
   });
 
   it('allows member users to write cards and wiki while hiding administration', async () => {
@@ -1689,7 +1851,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: /new wiki page/i })).toBeEnabled();
 
     await clickPrimaryNavButton(/planning/i);
-    expect(screen.queryByRole('button', { name: /create sprint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create weekly sprint/i })).not.toBeInTheDocument();
   });
 
   it('allows team admins to manage board structure without workspace user administration', async () => {
@@ -1700,7 +1862,8 @@ describe('App', () => {
     await clickPrimaryNavButton(/settings/i);
 
     expect(await screen.findByRole('heading', { name: /workspace settings/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /new board/i })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /new board/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/team board: platform board/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add column/i })).toBeEnabled();
     expect(screen.queryByLabelText(/member email/i)).not.toBeInTheDocument();
     expect(screen.getByText(/admin access is required to manage workspace members/i)).toBeInTheDocument();
@@ -1725,6 +1888,9 @@ describe('App', () => {
   it('switches between board, wiki, and settings views', async () => {
     render(<App />);
 
+    await clickPrimaryNavButton(/roadmap/i);
+    expect(screen.getByRole('heading', { name: /roadmap dashboard/i })).toBeInTheDocument();
+
     await clickPrimaryNavButton(/planning/i);
     expect(screen.getByRole('heading', { name: /planning dashboard/i })).toBeInTheDocument();
 
@@ -1739,7 +1905,89 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: /platform board/i })).toBeInTheDocument();
   });
 
-  it('plans named sprints from backlog through completion', async () => {
+  it('plans epics and dependencies on the roadmap dashboard', async () => {
+    render(<App />);
+
+    await clickPrimaryNavButton(/roadmap/i);
+
+    expect(await screen.findByRole('heading', { name: /roadmap dashboard/i })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: /epic identity foundations/i })).toHaveTextContent('Ready for review API shape');
+    expect(screen.getByRole('region', { name: /unassigned roadmap backlog/i })).toHaveTextContent('Wire auth session cookie flow');
+
+    fireEvent.change(screen.getByLabelText(/epic title/i), {
+      target: { value: 'Roadmap hardening' },
+    });
+    fireEvent.change(screen.getByLabelText(/epic description/i), {
+      target: { value: 'Make roadmap planning usable for the team.' },
+    });
+    fireEvent.change(screen.getByLabelText(/epic start/i), {
+      target: { value: '2026-06-01' },
+    });
+    fireEvent.change(screen.getByLabelText(/epic target/i), {
+      target: { value: '2026-06-19' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create epic/i }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/epics',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            teamId: 'team-platform',
+            title: 'Roadmap hardening',
+            description: 'Make roadmap planning usable for the team.',
+            status: 'planned',
+            startsOn: '2026-06-01',
+            targetOn: '2026-06-19',
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('region', { name: /epic roadmap hardening/i })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/epic assignment for wire auth session cookie flow/i), {
+      target: { value: 'epic-1' },
+    });
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1/epic',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ epicId: 'epic-1' }),
+        }),
+      ),
+    );
+    expect(screen.getByRole('region', { name: /epic identity foundations/i })).toHaveTextContent('Wire auth session cookie flow');
+
+    fireEvent.change(screen.getByLabelText(/dependency blocker for wire auth session cookie flow/i), {
+      target: { value: 'card-2' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /add dependency for wire auth session cookie flow/i }));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/cards/card-1/dependencies',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ blockerCardId: 'card-2' }),
+        }),
+      ),
+    );
+    expect(screen.getAllByText(/blocked by ready for review api shape/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /remove dependency ready for review api shape from wire auth session cookie flow/i }));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/card-dependencies/dependency-created',
+        expect.objectContaining({
+          method: 'DELETE',
+        }),
+      ),
+    );
+    expect(screen.queryByText(/blocked by ready for review api shape/i)).not.toBeInTheDocument();
+  });
+
+  it('plans weekly sprints from backlog through completion', async () => {
     render(<App />);
 
     await clickPrimaryNavButton(/planning/i);
@@ -1748,19 +1996,16 @@ describe('App', () => {
     const backlog = screen.getByRole('region', { name: /backlog/i });
     expect(within(backlog).getByText('Wire auth session cookie flow')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText(/sprint name/i), {
-      target: { value: 'Sprint 2026-05 Platform' },
-    });
     fireEvent.change(screen.getByLabelText(/sprint goal/i), {
       target: { value: 'Ship planning foundations' },
     });
-    fireEvent.change(screen.getByLabelText(/starts on/i), {
-      target: { value: '2026-05-04' },
+    fireEvent.change(screen.getByLabelText(/sprint week/i), {
+      target: { value: '2026-W20' },
     });
-    fireEvent.change(screen.getByLabelText(/ends on/i), {
-      target: { value: '2026-05-15' },
+    fireEvent.change(screen.getByLabelText(/sprint week/i), {
+      target: { value: '2026-W19' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /create sprint/i }));
+    fireEvent.click(screen.getByRole('button', { name: /create weekly sprint/i }));
 
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
@@ -1769,23 +2014,19 @@ describe('App', () => {
           method: 'POST',
           body: JSON.stringify({
             teamId: 'team-platform',
-            boardId: 'board-1',
-            name: 'Sprint 2026-05 Platform',
             goal: 'Ship planning foundations',
             startsOn: '2026-05-04',
-            endsOn: '2026-05-15',
+            endsOn: '2026-05-10',
           }),
         }),
       ),
     );
 
     const timeline = screen.getByRole('region', { name: /sprint timeline/i });
-    expect(within(timeline).getByText('Sprint 2026-05 Platform')).toBeInTheDocument();
+    expect(within(timeline).getByText('Sprint 2026-W19')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start sprint/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /start sprint 2026-05 platform/i }));
-    expect(await screen.findByRole('region', { name: /active sprint sprint 2026-05 platform/i })).toHaveTextContent('Sprint 2026-05 Platform');
-
-    fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-05 platform/i }));
+    fireEvent.click(screen.getByRole('button', { name: /complete sprint 2026-w19/i }));
     fireEvent.click(screen.getByRole('button', { name: /^complete sprint$/i }));
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
@@ -1796,7 +2037,7 @@ describe('App', () => {
         }),
       ),
     );
-    expect(await screen.findByRole('region', { name: /completed sprint sprint 2026-05 platform/i })).toHaveTextContent('Sprint 2026-05 Platform');
+    expect(await screen.findByRole('region', { name: /completed sprint sprint 2026-w19/i })).toHaveTextContent('Sprint 2026-W19');
   });
 
   it('chooses next-sprint rollover targets when completing the active sprint', async () => {
@@ -1808,7 +2049,9 @@ describe('App', () => {
     const nextSprint = {
       ...sprintFixture,
       id: 'sprint-next',
-      name: 'Sprint 2026-05 Follow-up',
+      name: 'Sprint 2026-W20',
+      startsOn: '2026-05-11',
+      endsOn: '2026-05-17',
     };
     const activeCards = [
       { ...boardFixture.columns[0].cards[0], sprintId: currentSprint.id },
@@ -1887,7 +2130,7 @@ describe('App', () => {
         }),
       ),
     );
-    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-05 follow-up/i })).toHaveTextContent('Wire auth session cookie flow');
+    expect(await screen.findByRole('region', { name: /planned sprint sprint 2026-w20/i })).toHaveTextContent('Wire auth session cookie flow');
   });
 
   it('expands the kanban board and collapses the left navigation', async () => {

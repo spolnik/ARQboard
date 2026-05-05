@@ -3,13 +3,63 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/spolnik/arqboard/migrations"
 )
+
+func TestTeamOwnedBoardAndWeeklySprintDefaults(t *testing.T) {
+	ctx := context.Background()
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
+	store, cleanup := setupBoardStore(t, ctx, databaseURL)
+	defer cleanup()
+
+	teamStore := TeamStore{Conn: store.Conn}
+	team, err := teamStore.CreateTeam(ctx, CreateTeamParams{Name: "Godforge"})
+	if err != nil {
+		t.Fatalf("CreateTeam returned error: %v", err)
+	}
+	boards, err := store.ListBoards(ctx)
+	if err != nil {
+		t.Fatalf("ListBoards returned error: %v", err)
+	}
+	teamBoards := boardsForTeam(boards, team.ID)
+	if len(teamBoards) != 1 || teamBoards[0].Name != "Godforge" {
+		t.Fatalf("team boards = %#v, want one Godforge board", teamBoards)
+	}
+	if _, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Extra Godforge Board", TeamID: team.ID}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("CreateBoard second team board error = %v, want ErrValidation", err)
+	}
+
+	weekSprint, err := store.CreateSprint(ctx, CreateSprintParams{
+		TeamID:   team.ID,
+		StartsOn: "2026-05-04",
+	})
+	if err != nil {
+		t.Fatalf("CreateSprint weekly returned error: %v", err)
+	}
+	if weekSprint.Name != "Sprint 2026-W19" || weekSprint.StartsOn != "2026-05-04" || weekSprint.EndsOn != "2026-05-10" {
+		t.Fatalf("week sprint = %#v, want ISO week 19 window", weekSprint)
+	}
+
+	currentTeam, err := teamStore.CreateTeam(ctx, CreateTeamParams{Name: "Current Week Team"})
+	if err != nil {
+		t.Fatalf("CreateTeam current returned error: %v", err)
+	}
+	currentName, currentStartsOn, currentEndsOn := weeklySprintWindow(time.Now())
+	currentSprint, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: currentTeam.ID})
+	if err != nil {
+		t.Fatalf("CreateSprint current week returned error: %v", err)
+	}
+	if currentSprint.Name != currentName || currentSprint.StartsOn != currentStartsOn || currentSprint.EndsOn != currentEndsOn || currentSprint.Status != "active" || currentSprint.StartedAt == "" {
+		t.Fatalf("current sprint = %#v, want active %s %s-%s", currentSprint, currentName, currentStartsOn, currentEndsOn)
+	}
+}
 
 func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	ctx := context.Background()
@@ -25,8 +75,8 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBoard returned error: %v", err)
 	}
-	if otherBoard.TeamID != board.TeamID {
-		t.Fatalf("otherBoard.TeamID = %q, want same default team %q", otherBoard.TeamID, board.TeamID)
+	if otherBoard.TeamID == board.TeamID {
+		t.Fatalf("otherBoard.TeamID = %q, want a separate team-owned board", otherBoard.TeamID)
 	}
 
 	initial, err := store.GetPlanningDashboard(ctx, board.TeamID)
@@ -38,36 +88,31 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	}
 	activeCard := initial.ActiveSprint.Cards[0]
 
-	otherCard, err := store.CreateCard(ctx, CreateCardParams{
-		ColumnID: otherBoard.Columns[0].ID,
-		Title:    "Coordinate release train backlog",
-	})
+	defaultDashboard, err := store.GetPlanningDashboard(ctx, board.TeamID)
 	if err != nil {
-		t.Fatalf("CreateCard other board returned error: %v", err)
+		t.Fatalf("GetPlanningDashboard default team returned error: %v", err)
 	}
-	withTwoBoards, err := store.GetPlanningDashboard(ctx, board.TeamID)
+	if len(defaultDashboard.Boards) != 1 || defaultDashboard.Boards[0].TeamID != board.TeamID {
+		t.Fatalf("default team boards = %#v, want exactly one team-owned board", defaultDashboard.Boards)
+	}
+	otherDashboardBefore, err := store.GetPlanningDashboard(ctx, otherBoard.TeamID)
 	if err != nil {
-		t.Fatalf("GetPlanningDashboard with two boards returned error: %v", err)
+		t.Fatalf("GetPlanningDashboard other team returned error: %v", err)
 	}
-	if withTwoBoards.ActiveSprint == nil || !containsCard(withTwoBoards.ActiveSprint.Cards, otherCard.ID) {
-		t.Fatalf("team active sprint cards = %#v, want card from second board", withTwoBoards.ActiveSprint)
-	}
-	if len(withTwoBoards.Boards) != 2 {
-		t.Fatalf("team planning boards = %d, want both team boards", len(withTwoBoards.Boards))
+	if len(otherDashboardBefore.Boards) != 1 || otherDashboardBefore.Boards[0].ID != otherBoard.ID {
+		t.Fatalf("other team boards = %#v, want release train board", otherDashboardBefore.Boards)
 	}
 
 	sprint, err := store.CreateSprint(ctx, CreateSprintParams{
 		TeamID:   board.TeamID,
-		Name:     "Sprint 2026-05 Platform",
 		Goal:     "Ship planning foundations",
-		StartsOn: "2026-05-04",
-		EndsOn:   "2026-05-15",
+		StartsOn: "2026-05-11",
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	if sprint.Status != "planned" || sprint.Name != "Sprint 2026-05 Platform" || sprint.TeamID != board.TeamID {
-		t.Fatalf("created sprint = %#v, want planned named sprint", sprint)
+	if sprint.Status != "planned" || sprint.Name != "Sprint 2026-W20" || sprint.StartsOn != "2026-05-11" || sprint.EndsOn != "2026-05-17" || sprint.TeamID != board.TeamID {
+		t.Fatalf("created sprint = %#v, want planned ISO week sprint", sprint)
 	}
 
 	teamStore := TeamStore{Conn: store.Conn}
@@ -75,14 +120,14 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTeam returned error: %v", err)
 	}
-	otherTeamBoard, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Mobile Board", TeamID: otherTeam.ID})
+	otherTeamBoard, err := singleBoardForTeam(ctx, store, otherTeam.ID)
 	if err != nil {
-		t.Fatalf("CreateBoard other team returned error: %v", err)
+		t.Fatalf("singleBoardForTeam other team returned error: %v", err)
 	}
 	otherSprint, err := store.CreateSprint(ctx, CreateSprintParams{
-		TeamID:  otherTeam.ID,
-		BoardID: otherTeamBoard.ID,
-		Name:    "Sprint 2026-05 Platform",
+		TeamID:   otherTeam.ID,
+		BoardID:  otherTeamBoard.ID,
+		StartsOn: "2026-05-11",
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint for other team returned error: %v", err)
@@ -162,6 +207,28 @@ func TestSprintPlanningDashboardLifecycle(t *testing.T) {
 	}
 }
 
+func boardsForTeam(boards []BoardSummary, teamID string) []BoardSummary {
+	matches := make([]BoardSummary, 0)
+	for _, board := range boards {
+		if board.TeamID == teamID {
+			matches = append(matches, board)
+		}
+	}
+	return matches
+}
+
+func singleBoardForTeam(ctx context.Context, store BoardStore, teamID string) (Board, error) {
+	boards, err := store.ListBoards(ctx)
+	if err != nil {
+		return Board{}, err
+	}
+	teamBoards := boardsForTeam(boards, teamID)
+	if len(teamBoards) != 1 {
+		return Board{}, fmt.Errorf("%w: expected one board for team", ErrValidation)
+	}
+	return store.GetBoard(ctx, teamBoards[0].ID)
+}
+
 func TestSprintPlanningValidation(t *testing.T) {
 	ctx := context.Background()
 	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "arqboard.db"))
@@ -196,14 +263,17 @@ func TestSprintPlanningValidation(t *testing.T) {
 		t.Fatalf("AssignCardToSprint missing sprint error = %v, want ErrNotFound", err)
 	}
 
-	first, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, Name: "Sprint One"})
+	first, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, StartsOn: "2026-05-11"})
 	if err != nil {
 		t.Fatalf("CreateSprint first returned error: %v", err)
 	}
-	if _, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, Name: "Sprint One"}); !errors.Is(err, ErrValidation) {
-		t.Fatalf("CreateSprint duplicate name error = %v, want ErrValidation", err)
+	if first.Name != "Sprint 2026-W20" {
+		t.Fatalf("first sprint name = %q, want Sprint 2026-W20", first.Name)
 	}
-	second, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, Name: "Sprint Two"})
+	if _, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, StartsOn: "2026-05-11"}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("CreateSprint duplicate week error = %v, want ErrValidation", err)
+	}
+	second, err := store.CreateSprint(ctx, CreateSprintParams{BoardID: board.ID, StartsOn: "2026-05-18"})
 	if err != nil {
 		t.Fatalf("CreateSprint second returned error: %v", err)
 	}
@@ -256,19 +326,9 @@ func TestSprintPlanningResolvesScopesAndRejectsTeamMismatches(t *testing.T) {
 	if !found || activeSprintID == "" {
 		t.Fatalf("activeSprintIDForBoard = (%q, %v), want active sprint", activeSprintID, found)
 	}
-	nextCurrentName, err := uniqueSprintName(ctx, store.Conn.SQL, store.Conn.Driver, board.TeamID, "Current sprint")
-	if err != nil {
-		t.Fatalf("uniqueSprintName returned error: %v", err)
-	}
-	if nextCurrentName != "Current sprint 2" {
-		t.Fatalf("uniqueSprintName = %q, want Current sprint 2", nextCurrentName)
-	}
-	defaultName, err := uniqueSprintName(ctx, store.Conn.SQL, store.Conn.Driver, board.TeamID, "")
-	if err != nil {
-		t.Fatalf("uniqueSprintName empty base returned error: %v", err)
-	}
-	if defaultName != "Sprint" {
-		t.Fatalf("uniqueSprintName empty base = %q, want Sprint", defaultName)
+	currentName, currentStartsOn, currentEndsOn := weeklySprintWindow(time.Now())
+	if currentName == "" || currentStartsOn == "" || currentEndsOn == "" {
+		t.Fatalf("weeklySprintWindow returned empty values: %q %q %q", currentName, currentStartsOn, currentEndsOn)
 	}
 	if _, err := store.GetPlanningDashboard(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetPlanningDashboard missing scope error = %v, want ErrNotFound", err)
@@ -288,25 +348,22 @@ func TestSprintPlanningResolvesScopesAndRejectsTeamMismatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTeam returned error: %v", err)
 	}
-	if _, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: otherTeam.ID, Name: "No board yet"}); !errors.Is(err, ErrValidation) {
-		t.Fatalf("CreateSprint for team without board error = %v, want ErrValidation", err)
-	}
-	otherBoard, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Mobile Board", TeamID: otherTeam.ID})
+	otherBoard, err := singleBoardForTeam(ctx, store, otherTeam.ID)
 	if err != nil {
-		t.Fatalf("CreateBoard other team returned error: %v", err)
+		t.Fatalf("singleBoardForTeam other team returned error: %v", err)
 	}
 	if _, err := store.CreateSprint(ctx, CreateSprintParams{
-		TeamID:  board.TeamID,
-		BoardID: otherBoard.ID,
-		Name:    "Wrong team board",
+		TeamID:   board.TeamID,
+		BoardID:  otherBoard.ID,
+		StartsOn: "2026-05-11",
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("CreateSprint mismatched team board error = %v, want ErrValidation", err)
 	}
 
 	otherSprint, err := store.CreateSprint(ctx, CreateSprintParams{
-		TeamID:  otherTeam.ID,
-		BoardID: otherBoard.ID,
-		Name:    "Mobile Sprint",
+		TeamID:   otherTeam.ID,
+		BoardID:  otherBoard.ID,
+		StartsOn: "2026-05-11",
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint other team returned error: %v", err)
@@ -339,7 +396,7 @@ func TestSprintPlanningRolloverValidationAndCompletedAssignments(t *testing.T) {
 	}
 	activeSprint := dashboard.ActiveSprint.Sprint
 	activeCard := dashboard.ActiveSprint.Cards[0]
-	nextSprint, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: board.TeamID, Name: "Next Sprint"})
+	nextSprint, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: board.TeamID, StartsOn: "2026-05-11"})
 	if err != nil {
 		t.Fatalf("CreateSprint next returned error: %v", err)
 	}
@@ -369,11 +426,11 @@ func TestSprintPlanningRolloverValidationAndCompletedAssignments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTeam returned error: %v", err)
 	}
-	otherBoard, err := store.CreateBoard(ctx, CreateBoardParams{Name: "Infrastructure Board", TeamID: otherTeam.ID})
+	otherBoard, err := singleBoardForTeam(ctx, store, otherTeam.ID)
 	if err != nil {
-		t.Fatalf("CreateBoard other team returned error: %v", err)
+		t.Fatalf("singleBoardForTeam other team returned error: %v", err)
 	}
-	otherSprint, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: otherTeam.ID, BoardID: otherBoard.ID, Name: "Infra Sprint"})
+	otherSprint, err := store.CreateSprint(ctx, CreateSprintParams{TeamID: otherTeam.ID, BoardID: otherBoard.ID, StartsOn: "2026-05-11"})
 	if err != nil {
 		t.Fatalf("CreateSprint other team returned error: %v", err)
 	}
